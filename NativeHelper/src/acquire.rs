@@ -41,10 +41,20 @@ fn trusted_component(out:&Path,name:&str,data:&[u8])->Result<bool>{
  if !out.join(name).exists(){create(&out.join(name))?.write_all(data)?;} Ok(true)
 }
 async fn download(client:&reqwest::Client,url:&str,path:&Path,size:Option<u64>,limit:u64,expected:Option<&str>,phase:&str)->Result<String> {
+ download_with_signature(client,url,path,size,limit,expected,phase,false).await
+}
+fn legacy_package_source(url:&reqwest::Url,phase:&str,has_digest:bool,verify_retail_signature:bool)->bool {
+ phase=="downloading-game" && url.scheme()=="http" && url.username().is_empty() && url.password().is_none() &&
+ url.query().is_none() && url.fragment().is_none() && matches!(url.host_str(),Some("assets1.xboxlive.com"|"assets2.xboxlive.com")) &&
+ (has_digest || verify_retail_signature || cfg!(feature="bootstrap-pins"))
+}
+async fn download_with_signature(client:&reqwest::Client,url:&str,path:&Path,size:Option<u64>,limit:u64,expected:Option<&str>,phase:&str,verify_retail_signature:bool)->Result<String> {
  let mut url=reqwest::Url::parse(url)?;
- let legacy_public_package=phase=="downloading-game" && url.scheme()=="http" && url.query().is_none() && url.fragment().is_none() && matches!(url.host_str(),Some("assets1.xboxlive.com"|"assets2.xboxlive.com")) && (expected.is_some() || cfg!(feature="bootstrap-pins"));
+ let legacy_public_package=legacy_package_source(&url,phase,expected.is_some(),verify_retail_signature);
  // Microsoft's legacy CDN offers encrypted public containers over HTTP. No account credentials
- // are sent there; release acquisition requires a pinned full SHA-256 before any decryption.
+ // are sent there; legacy HTTP requires a known digest or signed-container verification.
+ // Unknown packages using this transport MUST pass retail RSA-PSS and the complete
+ // signed hash tree before parsing/decryption; data hashes alone are insufficient.
  // HTTPS verification stays enabled for all HTTPS requests and every account/SDK endpoint.
  if url.scheme()=="http" && !legacy_public_package { url.set_scheme("https").map_err(|_|err())?; }
  if (!legacy_public_package && url.scheme()!="https") || url.username()!="" || url.password().is_some(){return Err(err())}
@@ -67,6 +77,19 @@ async fn download(client:&reqwest::Client,url:&str,path:&Path,size:Option<u64>,l
   if !valid {return Err(err())}
  }
  progress(phase,done,done);Ok(hex(a))
+}
+/// Diagnostic acquisition authenticates an encrypted container but never decrypts,
+/// installs, starts a game, or changes any library/bottle/selection.
+pub async fn download_signed_probe(url:&str,path:&Path,id:uuid::Uuid,version:&str,size:u64)->Result<String> {
+ if path.exists() || size==0 || size>32*1024*1024*1024 {return Err(err())}
+ let client=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none())
+  .connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(90)).build()?;
+ let digest=download_with_signature(&client,url,path,Some(size),size,None,"downloading-game",true).await?;
+ let mut clock=std::time::Instant::now();
+ crate::signed_package::verify_file(path,id,version,size,|n,total|{
+  if clock.elapsed().as_millis()>250 {progress("verifying-package",n,total);clock=std::time::Instant::now();}
+ })?;
+ Ok(digest)
 }
 /// Zip, MSI and CAB parsers ship inside the signed helper. No shell or developer tools.
 pub fn extract_sdk(archive:&Path,out:&Path)->Result<()> {
@@ -118,13 +141,15 @@ fn extract_nuget(archive:&Path,out:&Path)->Result<()> {
  let mut notice=z.by_name("LICENSE.md")?;if notice.size()>1024*1024{return Err(err())}
  let mut text=vec![];notice.read_to_end(&mut text)?;create(&out.join("Microsoft-GDK-LICENSE.md"))?.write_all(&text)?;Ok(())
 }
-pub async fn install(stage:&Path,game_definition:crate::game::Game)->Result<()> {
+pub async fn install(stage:&Path,game_definition:crate::game::Game,experimental:bool,requested:&str)->Result<()> {
  // Parent supplied a UUID staging directory. Never accept arbitrary pre-existing game trees.
  if !stage.is_dir()||!stage.file_name().and_then(|n|n.to_str()).is_some_and(|n|n.starts_with(".staging-")&&uuid::Uuid::parse_str(&n[9..]).is_ok())||stage.join("Game").exists(){return Err(err())}
  let canonical=std::fs::canonicalize(stage)?;if canonical!=stage{return Err(err())}
  let receipt:serde_json::Value=serde_json::from_reader(std::fs::File::open(stage.join("metadata.json"))?)?;
  let stage_id=&stage.file_name().and_then(|s|s.to_str()).ok_or_else(err)?[9..];
  if receipt["id"].as_str()!=Some(stage_id)||receipt["gameId"].as_str()!=Some(game_definition.id())||receipt["storeId"].as_str()!=Some(game_definition.store_id())||receipt["managed"]!=true||receipt["path"].as_str().and_then(|s|reqwest::Url::parse(s).ok()).and_then(|u|u.to_file_path().ok())!=Some(stage.join("Game")) {return Err(err())}
+ if receipt["experimental"].as_bool().unwrap_or(false)!=experimental || receipt["version"].as_str()!=Some(requested) {return Err(err())}
+ game_definition.validate_install(requested,experimental)?;
  let versions=stage.parent().ok_or_else(err)?;
  if versions.file_name().and_then(|s|s.to_str())!=Some("Versions")||versions.parent().and_then(|p|p.file_name()).and_then(|s|s.to_str())!=Some(game_definition.id()) {return Err(err())}
  xodus::secrets::init_secrets()?;let tokens=TokenManager::with_keychain_and_memory();
@@ -132,24 +157,31 @@ pub async fn install(stage:&Path,game_definition:crate::game::Game)->Result<()> 
  if tokens.get_user().is_err(){return Err(err())}
  progress("authorizing",0,0);
  xodus::tokens::device::ensure_device_credentials(&client,&tokens).await;
- let id=crate::package::get_content_id(&client,game_definition.store_id().into(),Some("neutral".into())).await?;
+ let id=if experimental {
+  crate::package::get_content_id(&client,game_definition.store_id().into(),Some("neutral".into())).await?
+ }else{game_definition.content_id().to_owned()};
  crate::license::get_license(&client,&tokens,id.clone(),"neutral".into()).await?;
- let package=crate::package::get_packages(&client,&tokens,id.clone()).await?;
+ let package=crate::package::get_package_version(&client,&tokens,id.clone(),if experimental {None}else{Some(game_definition.tested_package_version())}).await
+    .map_err(|e|if experimental {e}else{std::io::Error::other("TESTED_PACKAGE_UNAVAILABLE").into()})?;
  let (version, revision)=crate::package::normalize_version(&package.version)?;
- game_definition.validate(&version)?;
- if uuid::Uuid::parse_str(&package.content_id)?!=uuid::Uuid::parse_str(&id)? {return Err(err())} // Only the tested executable/profile is accepted.
+ game_definition.validate_install(&version,experimental)?;
+ if version!=requested {return Err(std::io::Error::other("PACKAGE_VERSION_CHANGED").into())}
+ if !experimental && revision.as_deref()!=Some(game_definition.tested_package_version().splitn(5,'.').nth(4).ok_or_else(err)?) {return Err(err())}
+ if uuid::Uuid::parse_str(&package.content_id)?!=uuid::Uuid::parse_str(&id)? {return Err(err())} // Package identity must match the entitled game.
  let candidates:Vec<_>=package.package_files.iter().filter(|f|f.file_name.to_ascii_lowercase().ends_with(".msixvc")).collect();
  if candidates.len()!=1{return Err(err())}let file=candidates[0];
  if file.file_size<=0||file.file_size>32*1024*1024*1024i64{return Err(err())}
  let pin_id=format!("{}:{}",id,revision.as_deref().unwrap_or(""));
  let pins:HashMap<String,String>=serde_json::from_str(include_str!("package-pins.json"))?;
  let pinned_hash=pins.get(&pin_id);
- let expected_hash=if game_definition==crate::game::Game::Bedrock {
+ let expected_hash=if experimental {
+  pinned_hash.map(String::as_str).or_else(||strong_digest(&file.file_hash).then_some(file.file_hash.as_str()))
+ }else if game_definition==crate::game::Game::Bedrock {
   let digest=pinned_hash.map(String::as_str).or_else(||(!file.file_hash.is_empty()).then_some(file.file_hash.as_str()));
   if !digest.is_some_and(strong_digest) {return Err(std::io::Error::other("BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED").into())}digest
  }else{if !file.file_hash.is_empty(){Some(file.file_hash.as_str())}else{pinned_hash.map(String::as_str)}};
  // Developer-only first pin acquisition over authenticated Microsoft HTTPS. Never enabled in distributable builds.
- if expected_hash.is_none() && (!cfg!(feature="bootstrap-pins") || game_definition != crate::game::Game::Dungeons) {return Err(err())}
+ if expected_hash.is_none() && !experimental && (!cfg!(feature="bootstrap-pins") || game_definition != crate::game::Game::Dungeons) {return Err(err())}
  let file_id=uuid::Uuid::parse_str(&file.content_id)?;
  let (device_key,license)=crate::license::get_license(&client,&tokens,file.content_id.clone(),"neutral".into()).await?;
  if license.content_keys.len()!=1{return Err(err())}
@@ -158,26 +190,41 @@ pub async fn install(stage:&Path,game_definition:crate::game::Game)->Result<()> 
  let game=stage.join("Game");let components=stage.join("Components");new_dir(&game)?;new_dir(&components)?;
  let encrypted=stage.join("download.msixvc");
  progress("downloading-game",0,file.file_size as u64);
- let game_client=reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(90)).user_agent("MinecraftMacLauncher/0.2").build()?;
+ let verify_retail_signature=experimental && expected_hash.is_none();
+ let game_client=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(90)).user_agent("MinecraftMacLauncher/0.2").build()?;
  let mut package_hash=None;
- for root in file.cdn_root_paths.iter().take(4) {
+ let mut roots=file.cdn_root_paths.clone();
+ if experimental {
+  roots.extend(file.background_cdn_root_paths.clone());
+  roots.extend(["https://dlassets.xboxlive.com/", "https://dlassets2.xboxlive.com/", "https://assets1.xboxlive.com.delivery.microsoft.com/", "https://assets2.xboxlive.com.delivery.microsoft.com/"].map(str::to_owned));
+ }
+ let mut attempted=HashSet::new();
+ for root in roots.iter().take(if experimental {12}else{4}) {
   let url=format!("{}{}",root,file.relative_url);
-  match download(&game_client,&url,&encrypted,Some(file.file_size as u64),file.file_size as u64,expected_hash,"downloading-game").await {
+  if !attempted.insert(url.clone()) {continue;}
+  match download_with_signature(&game_client,&url,&encrypted,Some(file.file_size as u64),file.file_size as u64,expected_hash,"downloading-game",verify_retail_signature).await {
    Ok(digest)=>{package_hash=Some(digest);break;},
    Err(_)=>{if encrypted.exists(){std::fs::remove_file(&encrypted)?;}}
   }
  }
- let package_hash=package_hash.ok_or_else(err)?;
+ let package_hash=package_hash.ok_or_else(||if experimental && expected_hash.is_none() {std::io::Error::other("PACKAGE_DOWNLOAD_UNAVAILABLE").into()}else{err()})?;
  // The developer pin bootstrap is anchored to the untouched reference's complete header/hash-table prefix.
- if expected_hash.is_none() {
+ if expected_hash.is_none() && !experimental {
   let mut prefix_file=std::fs::File::open(&encrypted)?;let mut h=Sha256::new();let mut left=63122179usize;let mut b=[0u8;1024*1024];
   while left>0 {let n=prefix_file.read(&mut b[..left.min(1024*1024)])?;if n==0{return Err(err())}h.update(&b[..n]);left-=n;}
   if hex(h.finalize())!="5daa5f84d81bd12d295fdbe66306dd22465874dec45aa68890a180feb80c4948"{return Err(err())}
  }
+ if verify_retail_signature {
+  progress("verifying-package",0,file.file_size as u64);
+  let mut clock=std::time::Instant::now();
+  crate::signed_package::verify_file(&encrypted,file_id,&version,file.file_size as u64,|n,total|{
+   if clock.elapsed().as_millis()>250 {progress("verifying-package",n,total);clock=std::time::Instant::now();}
+  })?;
+ }
  let mut source=tokio::io::BufReader::with_capacity(2*1024*1024,tokio::fs::File::open(&encrypted).await?);
  let xvd=msixvc::xvd::XvdFile::parse(&mut source).await?;
  if xvd.content_id()!=file_id{return Err(err())}
- if expected_hash.is_none() {
+ if expected_hash.is_none() && !verify_retail_signature {
   let mut clock=std::time::Instant::now();
   xvd.verify_all_data(&mut source,|n,total|{if clock.elapsed().as_millis()>250{progress("verifying-package",n,total);clock=std::time::Instant::now();}}).await?;
  }
@@ -305,4 +352,18 @@ pub fn extract_public_signing_keys(archive:&Path,out:&Path)->Result<()> {
   }
  }
  Ok(())
+}
+
+#[cfg(test)] mod source_policy_tests {
+ use super::*;
+ #[test] fn only_public_xbox_payloads_can_use_signed_container_transport() {
+  let url=reqwest::Url::parse("http://assets1.xboxlive.com/public/game.msixvc").unwrap();
+  assert!(legacy_package_source(&url,"downloading-game",false,true));
+  assert!(legacy_package_source(&url,"downloading-game",true,false));
+  assert_eq!(legacy_package_source(&url,"downloading-game",false,false),cfg!(feature="bootstrap-pins"));
+  assert!(!legacy_package_source(&url,"downloading-components",true,true));
+  for invalid in ["http://example.com/game", "http://assets1.xboxlive.com.evil.test/game", "http://user@assets1.xboxlive.com/game", "http://assets1.xboxlive.com/game?token=x", "http://assets1.xboxlive.com/game#fragment"] {
+   assert!(!legacy_package_source(&reqwest::Url::parse(invalid).unwrap(),"downloading-game",false,true));
+  }
+ }
 }

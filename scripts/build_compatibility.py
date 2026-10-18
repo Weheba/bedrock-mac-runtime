@@ -14,3 +14,9 @@ profile=json.loads((root/'Sources/LauncherCore/Resources/compatibility.json').re
 for name in ['XCurl.dll','xgameruntime.dll']:
  profile['hashes']['Dungeons/Binaries/WinGDK/'+name]=hashlib.sha256((out/name).read_bytes()).hexdigest()
 (root/'Sources/LauncherCore/Resources/compatibility-managed.json').write_text(json.dumps(profile,indent=2)+'\n')
+# Keep both reviewed game profiles when rebuilding launcher-owned components.
+latest_path=root/'Sources/LauncherCore/Resources/compatibility-managed-1.1.2.json'
+latest=json.loads(latest_path.read_text())
+for name in ['XCurl.dll','xgameruntime.dll']:
+ latest['hashes']['Dungeons/Binaries/WinGDK/'+name]=profile['hashes']['Dungeons/Binaries/WinGDK/'+name]
+latest_path.write_text(json.dumps(latest,indent=2)+'\n')

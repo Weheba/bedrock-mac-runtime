@@ -4,6 +4,8 @@ import LauncherCore
 
 @MainActor
 final class AppModel: ObservableObject {
+    @Published var testedUpdate: TestedReleaseUpdate?
+    private var offeredTestedUpdates: Set<String> = []
     @Published var database = LibraryDatabase()
     @Published var crossOver = CrossOver.detect()
     @Published var progress: OperationProgress?
@@ -21,6 +23,7 @@ final class AppModel: ObservableObject {
     @Published var selectedBottle = ""
     @Published var selectedGame: GameDefinition = .dungeons2
     @Published var accounts: [GameDefinition: AccountStatus] = [:]
+    @Published var versionCheckedAt: [GameDefinition: Date] = [:]
     var account: AccountStatus? {
         get { accounts[selectedGame] }
         set { accounts[selectedGame] = newValue }
@@ -32,6 +35,11 @@ final class AppModel: ObservableObject {
     var current: Installation? { database.current(for: selectedGame) }
     func current(for game: GameDefinition) -> Installation? { database.current(for: game) }
     var bottles: [String] { crossOver?.bottles() ?? [] }
+    /// Supports previews and hosted UI checks without opening the user's library.
+    init(store: LibraryStore?, diagnostics: Diagnostics?) {
+        self.store = store
+        self.diagnostics = diagnostics
+    }
     init() {
         do {
             store = try LibraryStore(); diagnostics = Diagnostics(root: LibraryStore.defaultRoot)
@@ -54,6 +62,22 @@ final class AppModel: ObservableObject {
         if let store { database = await store.snapshot(); staging = await store.staleStaging() }
         crossOver = CrossOver.detect(); running = CrossOver.gameRunning()
         runningGames = GameTermination.runningGames(installations: database.installations, crossOver: crossOver)
+        offerTestedUpdate()
+    }
+    func offerTestedUpdate() {
+        guard !busy, !running, error == nil, testedUpdate == nil,
+              let update = TestedReleaseUpdate(game: selectedGame, installations: database.installations, selected: current),
+              !offeredTestedUpdates.contains(update.id) else { return }
+        offeredTestedUpdates.insert(update.id)
+        testedUpdate = update
+    }
+    func acceptTestedUpdate(_ update: TestedReleaseUpdate) async {
+        testedUpdate = nil
+        if let id = update.installedID, let install = database.installations.first(where: { $0.id == id }) {
+            await select(install)
+        } else {
+            await installAndPlay(game: update.game, launch: false)
+        }
     }
     func progressHandler() -> @Sendable (OperationProgress) -> Void {
         { [weak self] update in Task { @MainActor in if let self, self.busy { self.progress = update } } }
@@ -86,7 +110,7 @@ final class AppModel: ObservableObject {
                 self.accounts[game] = try await self.nativeAccount.request(.check, game: game)
             }
             if current.isOfficialManaged {
-                let profile = try CompatibilityProfile.managed(for: game)
+                let profile = try CompatibilityProfile.forInstallation(current)
                 if profile.hashes.contains(where: { current.hashes[$0.key] != $0.value }) {
                     // A launcher update supplies a new verified runtime; repair only owned files.
                     try await store.repairManaged(current.id, progress: self.progressHandler())
@@ -100,6 +124,7 @@ final class AppModel: ObservableObject {
         defer {
             running = CrossOver.gameRunning()
             runningGames = GameTermination.runningGames(installations: database.installations, crossOver: crossOver)
+        offerTestedUpdate()
             if requestedQuit == game { requestedQuit = nil }
         }
         do {
@@ -135,7 +160,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func installAndPlay(game: GameDefinition? = nil, launch: Bool = true) async {
+    func installAndPlay(game: GameDefinition? = nil, launch: Bool = true, untestedVersion: String? = nil, selectForPlay: Bool = true) async {
         let game = game ?? selectedGame
         crossOver = CrossOver.detect()
         guard let store, !busy, !running else { return }
@@ -145,23 +170,34 @@ final class AppModel: ObservableObject {
             self.progress = .init("Checking Microsoft sign-in")
             self.accounts[game] = try await self.nativeAccount.request(.status, game: game)
             if self.accounts[game]?.signedIn != true { self.accounts[game] = try await self.nativeAccount.request(.login, game: game) }
-            self.accounts[game] = try await self.nativeAccount.request(.check, game: game)
-            guard self.accounts[game]?.entitlement == "verified" else { throw LauncherError("ENTITLEMENT_NOT_CONFIRMED", "Microsoft did not confirm ownership.") }
-            if let available = self.accounts[game]?.availableVersion { try game.validateVersion(available) }
-            _ = try await store.install(game: game, progress: self.progressHandler())
-            self.message = "Game, Microsoft components and CrossOver environment are ready."
+            if untestedVersion != nil {
+                self.accounts[game] = try await self.nativeAccount.request(.check, game: game)
+                self.versionCheckedAt[game] = Date()
+                guard self.accounts[game]?.entitlement == "verified" else { throw LauncherError("ENTITLEMENT_NOT_CONFIRMED", "Microsoft did not confirm ownership.") }
+            }
+            // The native installer authorizes the exact package before downloading.
+            // A tested download must not depend on a successful latest-package lookup.
+            let version = untestedVersion ?? game.baseline
+            try game.validateInstallVersion(version, allowUntested: untestedVersion != nil)
+            if let untestedVersion, self.accounts[game]?.availableVersion != untestedVersion {
+                throw LauncherError("PACKAGE_VERSION_CHANGED", "The available version changed. Check for updates again.")
+            }
+            _ = try await store.install(game: game, version: version, experimental: untestedVersion != nil, selectForPlay: selectForPlay, progress: self.progressHandler())
+            self.message = untestedVersion != nil ? "Untested version installed in a separate environment. Choose it under Installed when you want to try it." : selectForPlay ? "Latest tested version installed and selected for Play." : "Tested version installed. Choose Select for Play under Installed when you are ready."
         }
-        if error == nil && launch { await play(game: game) }
+        if error == nil && launch && selectForPlay && untestedVersion == nil { await play(game: game) }
     }
     func checkUpdates(game requestedGame: GameDefinition? = nil) async {
         let game = requestedGame ?? selectedGame
+        guard !busy, !running else { return }
         await accountOperation(.check, game: game)
         guard error == nil, let available = accounts[game]?.availableVersion else { return }
-        if available == current(for: game)?.version && (current(for: game)?.packageRevision == nil || current(for: game)?.packageRevision == accounts[game]?.availableRevision) { message = "Your game is up to date." }
-        else {
-            do { try game.validateVersion(available) } catch { self.error = error as? LauncherError; return }
-            await installAndPlay(game: game, launch: false)
-        }
+        message = "Microsoft version information refreshed: \(available)."
+    }
+    func versionAvailability(for game: GameDefinition) -> VersionAvailability {
+        VersionAvailability(game: game, availableVersion: accounts[game]?.availableVersion,
+                            revision: accounts[game]?.availableRevision, installations: database.installations,
+                            selected: current(for: game))
     }
     func clone(_ install: Installation) async {
         guard let store else { return }
@@ -200,12 +236,14 @@ final class AppModel: ObservableObject {
     }
     func accountOperation(_ command: NativeAccount.Command, game: GameDefinition? = nil) async {
         let game = game ?? selectedGame
+        guard !busy, !running else { return }
         // Clear old ownership evidence immediately, including after a failed new check.
-        accounts[game] = nil; error = nil
+        accounts[game] = nil; versionCheckedAt[game] = nil; error = nil
         await perform {
             self.progress = .init(command == .login ? "Waiting for Microsoft sign-in" : "Checking Microsoft account")
             self.accounts[game] = try await self.nativeAccount.request(command, game: game)
-            if command == .logout { self.accounts.removeAll() }
+            if command == .check { self.versionCheckedAt[game] = Date() }
+            if command == .logout { self.accounts.removeAll(); self.versionCheckedAt.removeAll() }
         }
     }
     func exportDiagnostics() {

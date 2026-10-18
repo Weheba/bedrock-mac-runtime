@@ -70,6 +70,12 @@ pub async fn get_packages(
     tokens: &TokenManager,
     content_id: String,
 ) -> Result<PackageDetails, Box<dyn std::error::Error>> {
+    get_package_version(client,tokens,content_id,None).await
+}
+
+pub async fn get_package_version(
+    client: &reqwest::Client, tokens: &TokenManager, content_id: String, version: Option<&str>
+) -> Result<PackageDetails, Box<dyn std::error::Error>> {
     let dev_token = tokens.get_device_sts_token().unwrap();
     let Token::Legacy(dev_token) = dev_token else {
         return Err(Box::new(std::io::Error::other("Invalid STS token")));
@@ -82,20 +88,18 @@ pub async fn get_packages(
     let xsts_token =
         xodus::api::xbox::run(client, dev_token, legacy, "http://update.xboxlive.com").await;
 
+    let endpoint = package_endpoint(&content_id, version)?;
     let response = client
-        .get(format!(
-            "{XBOX_LIVE_PACKAGES_PC}/GetBasePackage/{content_id}"
-        ))
+        .get(endpoint)
         .header("x-xbl-contract-version", "3")
         .header(
             "Authorization",
             xodus::api::xbox::get_xsts_auth_header(xsts_token),
         )
         .send()
-        .await
-        .unwrap();
+        .await?.error_for_status()?;
 
-    let res: PackageResponse = response.json().await.expect("Failed to get data");
+    let res: PackageResponse = response.json().await?;
 
     let PackageResponse::Found(package) = res else {
         return Err(Box::new(std::io::Error::other(
@@ -103,6 +107,16 @@ pub async fn get_packages(
         )));
     };
     Ok(package)
+}
+
+/// Fixed origin, UUID identity and strictly parsed version; never a caller URL.
+pub fn package_endpoint(content_id:&str, version:Option<&str>) -> Result<String,std::io::Error> {
+    let id=uuid::Uuid::parse_str(content_id).map_err(|_|std::io::Error::other("PACKAGE_INVALID"))?;
+    if let Some(version)=version {
+        let (number,revision)=normalize_version(version)?;
+        let revision=revision.ok_or_else(||std::io::Error::other("PACKAGE_VERSION_INVALID"))?;
+        Ok(format!("{XBOX_LIVE_PACKAGES_PC}/GetSpecificBasePackage/{id}/{number}.{revision}"))
+    } else { Ok(format!("{XBOX_LIVE_PACKAGES_PC}/GetBasePackage/{id}")) }
 }
 
 /// Xbox Packages PC uses `major.minor.build.revision.package-GUID`, not just four numbers.
@@ -113,6 +127,49 @@ pub fn normalize_version(raw: &str) -> Result<(String, Option<String>), std::io:
     let numbers = numbers.map_err(|_|std::io::Error::other("Package version invalid"))?;
     let revision = if parts.len()==5 { Some(uuid::Uuid::parse_str(parts[4]).map_err(|_|std::io::Error::other("Package revision invalid"))?.to_string()) } else { None };
     Ok((numbers.iter().map(u16::to_string).collect::<Vec<_>>().join("."), revision))
+}
+
+/// Read-only live diagnosis: license lookup, signed header, optionally the full encrypted package. Never
+/// emits account identifiers, authorization, signed URLs, or content keys.
+pub async fn probe_retail_header(game: crate::game::Game, output: &std::path::Path, full: bool) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    if output.exists() { return Err(std::io::Error::other("OUTPUT_EXISTS").into()); }
+    println!("{}",serde_json::json!({"schema":1,"probeStage":"keychain"}));
+    xodus::secrets::init_secrets()?;
+    let tokens=TokenManager::with_keychain_and_memory();
+    if tokens.get_user().is_err() { return Err(std::io::Error::other("SIGN_IN_REQUIRED").into()); }
+    let client=reqwest::Client::builder().https_only(true).timeout(std::time::Duration::from_secs(45)).build()?;
+    println!("{}",serde_json::json!({"schema":1,"probeStage":"device-auth"}));
+    xodus::tokens::device::ensure_device_credentials(&client,&tokens).await;
+    println!("{}",serde_json::json!({"schema":1,"probeStage":"store-metadata"}));
+    let id=get_content_id(&client,game.store_id().into(),Some("neutral".into())).await?;
+    println!("{}",serde_json::json!({"schema":1,"probeStage":"license"}));
+    crate::license::get_license(&client,&tokens,id.clone(),"neutral".into()).await?;
+    println!("{}",serde_json::json!({"schema":1,"probeStage":"package-metadata"}));
+    let package=get_packages(&client,&tokens,id).await?;
+    let (version,_)=normalize_version(&package.version)?;
+    let file=package.package_files.iter().find(|f|f.file_name.to_ascii_lowercase().ends_with(".msixvc")).ok_or_else(||std::io::Error::other("PACKAGE_INVALID"))?;
+    let root=file.cdn_root_paths.first().ok_or_else(||std::io::Error::other("SOURCE_MISSING"))?;
+    let url=reqwest::Url::parse(&format!("{}{}",root,file.relative_url))?;
+    if !matches!(url.host_str(),Some("assets1.xboxlive.com"|"assets2.xboxlive.com")) || url.username()!="" || url.password().is_some() || url.query().is_some() || url.fragment().is_some() { return Err(std::io::Error::other("SOURCE_INVALID").into()); }
+    let public=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).timeout(std::time::Duration::from_secs(30)).build()?;
+    println!("{}",serde_json::json!({"schema":1,"probeStage":"header-download"}));
+    let response=public.get(url.clone()).header("Range","bytes=0-4095").send().await?.error_for_status()?;
+    if response.status()!=reqwest::StatusCode::PARTIAL_CONTENT || response.content_length()!=Some(4096) { return Err(std::io::Error::other("RANGE_INVALID").into()); }
+    let bytes=response.bytes().await?;
+    let header: &[u8;4096]=bytes.as_ref().try_into()?;
+    println!("{}",serde_json::json!({"schema":1,"probeStage":"header-signature"}));
+    crate::signed_package::verify_header(header,uuid::Uuid::parse_str(&file.content_id)?,&version)?;
+    if full {
+    println!("{}",serde_json::json!({"schema":1,"probeStage":"full-download-and-integrity"}));
+        let digest=crate::acquire::download_signed_probe(url.as_str(),output,uuid::Uuid::parse_str(&file.content_id)?,&version,file.file_size as u64).await?;
+        println!("{}",serde_json::json!({"schema":1,"gameId":game.id(),"version":version,"size":file.file_size,"sha256":digest,"headerSignature":"Microsoft retail RSA-PSS-SHA256 verified","fullTreeAndContentVerified":true}));
+        return Ok(());
+    }
+    let mut out=std::fs::OpenOptions::new().write(true).create_new(true).open(output)?;
+    out.write_all(header)?; out.sync_all()?;
+    println!("{}",serde_json::json!({"schema":1,"gameId":game.id(),"version":version,"size":file.file_size,"headerSignature":"Microsoft retail RSA-PSS-SHA256 verified","downloadedBytes":4096}));
+    Ok(())
 }
 #[cfg(test)] mod version_tests {
     use super::*;
@@ -213,4 +270,18 @@ pub async fn review_download(output:&std::path::Path)->Result<(),Box<dyn std::er
     while let Some(bytes)=stream.next().await {let bytes=bytes?;done=done.checked_add(bytes.len() as u64).ok_or_else(||std::io::Error::other("SIZE_INVALID"))?;if done>file.file_size as u64{return Err(std::io::Error::other("SIZE_INVALID").into());}hash.update(&bytes);output.write_all(&bytes).await?;if clock.elapsed().as_secs()>=5 {println!("{}",serde_json::json!({"schema":1,"reviewBytes":done,"total":file.file_size}));clock=std::time::Instant::now();}}
     output.sync_all().await?;if done!=file.file_size as u64{return Err(std::io::Error::other("SIZE_INVALID").into());}
     let sha256:String=hash.finalize().iter().map(|b|format!("{b:02x}")).collect();println!("{}",serde_json::json!({"schema":1,"contentId":id,"revision":revision,"size":done,"sha256":sha256,"verified":false}));Ok(())
+}
+
+#[cfg(test)] mod endpoint_tests {
+ use super::*;
+ #[test] fn tested_download_uses_specific_revision_never_latest() {
+  let game=crate::game::Game::Dungeons;
+  let tested=package_endpoint(game.content_id(),Some(game.tested_package_version())).unwrap();
+  assert!(tested.contains("/GetSpecificBasePackage/"));
+  assert!(tested.ends_with(game.tested_package_version()));
+  assert!(package_endpoint(game.content_id(),None).unwrap().contains("/GetBasePackage/"));
+  assert!(package_endpoint("../account",None).is_err());
+  assert!(package_endpoint(game.content_id(),Some("1.1.1.0")).is_err());
+  assert!(package_endpoint(game.content_id(),Some("1.1.1.0.bad/../../")).is_err());
+ }
 }

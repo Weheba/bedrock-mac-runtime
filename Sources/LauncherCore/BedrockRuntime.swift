@@ -42,7 +42,7 @@ public enum BedrockRuntime {
         return destination
     }
     public static func validate(_ install: Installation, root: URL, crossOver: CrossOver, runProbes: Bool) throws {
-        try GameDefinition.bedrock.validateVersion(install.version)
+        try GameDefinition.bedrock.validateInstallVersion(install.version, allowUntested: install.usesUntestedVersion)
         try crossOver.requireBedrockVersion()
         guard install.isOfficialManaged, !install.hashes.isEmpty else { throw LauncherError("BEDROCK_PACKAGE_INVALID", "Bedrock requires an official managed package receipt.") }
         let runtime = try prepare(root: root)

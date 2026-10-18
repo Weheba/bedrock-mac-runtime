@@ -15,3 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: cargo test --locked --manifest-path Shared/CredentialBridge/Cargo.toml
+  native-helper:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: brew install protobuf
+      - run: rustup toolchain install stable --profile minimal
+      - run: rustup run stable cargo test --locked --manifest-path NativeHelper/Cargo.toml
+      - run: python3 scripts/test_bedrock_pin_review.py

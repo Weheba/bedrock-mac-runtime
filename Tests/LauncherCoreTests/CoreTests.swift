@@ -278,7 +278,7 @@ final class CoreTests: XCTestCase {
     }
 
     func testManagedProfileBindsNewRuntimeAndOriginalExecutable() throws {
-        let old = try CompatibilityProfile.bundled(), managed = try CompatibilityProfile.managed()
+        let old = try CompatibilityProfile.bundled(), managed = try CompatibilityProfile.managed(for: .dungeons2, version: "1.1.1.0")
         XCTAssertEqual(managed.version, old.version)
         XCTAssertEqual(managed.hashes["Dungeons/Binaries/WinGDK/Dungeons-WinGDK-Shipping.exe"], old.hashes["Dungeons/Binaries/WinGDK/Dungeons-WinGDK-Shipping.exe"])
         XCTAssertNotEqual(managed.hashes["Dungeons/Binaries/WinGDK/xgameruntime.dll"], old.hashes["Dungeons/Binaries/WinGDK/xgameruntime.dll"])

@@ -6,6 +6,7 @@ use std::panic::AssertUnwindSafe;
 use xodus::tokens::TokenManager;
 use xodus::models::secrets::Token;
 mod acquire;
+mod signed_package;
 mod bridge;
 mod license;
 mod package;
@@ -37,12 +38,23 @@ async fn main() {
     if command == "install" {
         let stage=std::env::args().nth(2).unwrap_or_default();
         let game = match game::Game::parse(&std::env::args().nth(3).unwrap_or_default()) { Ok(g)=>g,Err(_)=>{println!("{{\"schema\":1,\"type\":\"error\",\"code\":\"INSTALL_FAILED\"}}");std::process::exit(1)} };
-        let result=AssertUnwindSafe(acquire::install(std::path::Path::new(&stage), game)).catch_unwind().await;
+        let mode=std::env::args().nth(4).unwrap_or_else(||"tested".into());
+        let requested=std::env::args().nth(5).unwrap_or_else(||game.baseline().into());
+        if !matches!(mode.as_str(),"tested"|"experimental") || game.validate_install(&requested,mode=="experimental").is_err() {
+            println!("{{\"schema\":1,\"type\":\"error\",\"code\":\"INSTALL_FAILED\"}}");std::process::exit(1);
+        }
+        let result=AssertUnwindSafe(acquire::install(std::path::Path::new(&stage), game,mode=="experimental",&requested)).catch_unwind().await;
         if !matches!(result,Ok(Ok(()))) {
             let code=match result { Ok(Err(e))=>match e.to_string().as_str() {
                 "BEDROCK_VERSION_TOO_OLD"=>"BEDROCK_VERSION_TOO_OLD",
                 "BEDROCK_COMPATIBILITY_UNVERIFIED"=>"BEDROCK_COMPATIBILITY_UNVERIFIED",
                 "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED"=>"BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED",
+                "PACKAGE_VERSION_CHANGED"=>"PACKAGE_VERSION_CHANGED",
+                "SECURE_DOWNLOAD_UNAVAILABLE"=>"SECURE_DOWNLOAD_UNAVAILABLE",
+                "PACKAGE_DOWNLOAD_UNAVAILABLE"=>"PACKAGE_DOWNLOAD_UNAVAILABLE",
+                "PACKAGE_AUTHENTICITY_FAILED"=>"PACKAGE_AUTHENTICITY_FAILED",
+                "PACKAGE_FORMAT_UNSUPPORTED"=>"PACKAGE_FORMAT_UNSUPPORTED",
+                "TESTED_PACKAGE_UNAVAILABLE"=>"TESTED_PACKAGE_UNAVAILABLE",
                 _=>"INSTALL_FAILED"
             },_=>"INSTALL_FAILED" };
             println!("{}",serde_json::json!({"schema":1,"type":"error","code":code}));std::process::exit(1);
@@ -59,6 +71,14 @@ async fn main() {
     if command == "package-audit" {
         let result = AssertUnwindSafe(package::audit_bedrock(std::env::args().nth(2).as_deref())).catch_unwind().await;
         if !matches!(result, Ok(Ok(()))) { println!("{{\"schema\":1,\"code\":\"PACKAGE_AUDIT_FAILED\"}}"); std::process::exit(1); }
+        return;
+    }
+    if command == "package-probe" {
+        let game=match game::Game::parse(&std::env::args().nth(2).unwrap_or_default()) {Ok(game)=>game,Err(_)=>std::process::exit(1)};
+        let output=std::env::args().nth(3).unwrap_or_default();
+        let full=std::env::args().nth(4).as_deref()==Some("full");
+        let result=AssertUnwindSafe(package::probe_retail_header(game,std::path::Path::new(&output),full)).catch_unwind().await;
+        if !matches!(result,Ok(Ok(()))) {println!("{{\"schema\":1,\"code\":\"PACKAGE_PROBE_FAILED\"}}");std::process::exit(1)}
         return;
     }
     if command == "bedrock-service" {

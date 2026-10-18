@@ -6,7 +6,8 @@ public enum GameDefinition: String, Codable, CaseIterable, Sendable {
     public var name: String { self == .dungeons2 ? "Minecraft Dungeons II" : "Minecraft: Bedrock" }
     public var storeId: String { self == .dungeons2 ? "9P5786PJB9RP" : "9NBLGGH2JHXJ" }
     public var packageIdentity: String { self == .dungeons2 ? "Microsoft.MinecraftDungeons2" : "Microsoft.MinecraftUWP" }
-    public var baseline: String { self == .dungeons2 ? "1.1.1.0" : "1.26.5203.0" }
+    public var baseline: String { self == .dungeons2 ? "1.1.2.0" : "1.26.5203.0" }
+    public func isTestedVersion(_ version: String) -> Bool { version == baseline || (self == .dungeons2 && version == "1.1.1.0") }
     public var executable: String { self == .dungeons2 ? "Dungeons/Binaries/WinGDK/Dungeons-WinGDK-Shipping.exe" : "Minecraft.Windows.exe" }
     public var workingDirectory: String? { self == .dungeons2 ? "Dungeons/Binaries/WinGDK" : nil }
     public var overrides: String { self == .dungeons2 ? "xgameruntime=n;XCurl=n" : BedrockRuntime.dlls.map { $0 + "=n,b" }.joined(separator: ";") }
@@ -15,7 +16,13 @@ public enum GameDefinition: String, Codable, CaseIterable, Sendable {
         let value = try PackageVersion(version)
         let minimum = try PackageVersion(baseline)
         if self == .bedrock && value < minimum { throw LauncherError("BEDROCK_VERSION_TOO_OLD", "Bedrock requires version \(baseline) or newer.", recovery: "Your current working installation is unchanged.") }
-        guard value == minimum else { throw LauncherError(self == .bedrock ? "BEDROCK_COMPATIBILITY_UNVERIFIED" : "COMPATIBILITY_UNVERIFIED", "Compatibility not verified yet for \(version).", recovery: "Your current working version is unchanged. A newer launcher compatibility profile is required.") }
+        guard isTestedVersion(version) else { throw LauncherError(self == .bedrock ? "BEDROCK_COMPATIBILITY_UNVERIFIED" : "COMPATIBILITY_UNVERIFIED", "Compatibility not verified yet for \(version).", recovery: "Your current working version is unchanged. A newer launcher compatibility profile is required.") }
+    }
+    public func validateInstallVersion(_ version: String, allowUntested: Bool) throws {
+        if !allowUntested || isTestedVersion(version) { try validateVersion(version); return }
+        guard try PackageVersion(version) >= PackageVersion(baseline) else {
+            throw LauncherError("GAME_VERSION_TOO_OLD", "Choose the latest tested version or a newer build.")
+        }
     }
     public func versionRoot(in root: URL) throws -> URL { try FileSafety.child("Games/\(rawValue)/Versions", of: root) }
 }

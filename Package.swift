@@ -6,5 +6,6 @@ let package = Package(name: "MinecraftMacLauncher", platforms: [.macOS(.v14)], p
 ], targets: [
     .target(name: "LauncherCore", resources: [.copy("Resources")]),
     .executableTarget(name: "MinecraftMacLauncher", dependencies: ["LauncherCore"], resources: [.copy("Resources")]),
-    .testTarget(name: "LauncherCoreTests", dependencies: ["LauncherCore"])
+    .testTarget(name: "LauncherCoreTests", dependencies: ["LauncherCore"]),
+    .testTarget(name: "LauncherLayoutTests", dependencies: ["MinecraftMacLauncher"])
 ])

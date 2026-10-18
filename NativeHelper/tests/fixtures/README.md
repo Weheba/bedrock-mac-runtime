@@ -1,0 +1,1 @@
+These fixtures are synthetic, not Microsoft/game data. The 4 KiB header describes 171 pages filled with repeated byte values, UUID 11111111-2222-4333-8444-555555555555 and version 1.1.2.0. Its RSA-PSS/SHA256 signature uses the accompanying test-only public key. The generated private key was temporary and is not retained. Production must reject this signing key.

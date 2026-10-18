@@ -45,6 +45,8 @@ public struct Installation: Codable, Identifiable, Sendable, Equatable {
     public var compatibilityProfile: String
     public var packageRevision: String?
     public var origin: String?
+    public var experimental: Bool?
+    public var usesUntestedVersion: Bool { experimental == true && !game.isTestedVersion(version) }
     public var storageBytes: Int64?
     public var displayKind: String { !managed ? "Existing local installation" : (origin == "snapshot" ? "Local snapshot" : (isOfficialManaged ? "Downloaded installation" : "Local snapshot")) }
     public var game: GameDefinition { GameDefinition(rawValue: gameId)! }
@@ -128,9 +130,22 @@ public struct CompatibilityProfile: Codable, Sendable {
     public let version: String
     public let revision: Int
     public let hashes: [String: String]
-    public static func managed(for game: GameDefinition = .dungeons2) throws -> Self {
+    public static func forInstallation(_ install: Installation) throws -> Self {
+        try forVersion(game: install.game, version: install.version, experimental: install.usesUntestedVersion)
+    }
+    public static func forVersion(game: GameDefinition, version: String, experimental: Bool) throws -> Self {
+        try game.validateInstallVersion(version, allowUntested: experimental)
+        let tested = try managed(for: game, version: game.isTestedVersion(version) ? version : nil)
+        guard experimental && !game.isTestedVersion(version) else { return tested }
+        // Reuse only supplied compatibility components, never the old game's
+        // executable or original libHttpClient hash for a newer game package.
+        let hashes = tested.hashes.filter { game == .bedrock || (!$0.key.hasSuffix(".exe") && !$0.key.hasSuffix("libHttpClient.GDK.dll")) }
+        return Self(id: tested.id + "-experimental-" + version, gameId: game.rawValue, version: version, revision: tested.revision, hashes: hashes)
+    }
+    public static func managed(for game: GameDefinition = .dungeons2, version: String? = nil) throws -> Self {
         if game == .bedrock { return try BedrockRuntime.profile() }
-        guard let url = Bundle.module.url(forResource: "compatibility-managed", withExtension: "json", subdirectory: "Resources") else { throw LauncherError("CATALOG_MISSING", "Managed compatibility profile is missing.") }
+        let resource = (version ?? game.baseline) == "1.1.2.0" ? "compatibility-managed-1.1.2" : "compatibility-managed"
+        guard let url = Bundle.module.url(forResource: resource, withExtension: "json", subdirectory: "Resources") else { throw LauncherError("CATALOG_MISSING", "Managed compatibility profile is missing.") }
         return try JSONDecoder().decode(Self.self, from: Data(contentsOf: url))
     }
     public static func bundled() throws -> Self {

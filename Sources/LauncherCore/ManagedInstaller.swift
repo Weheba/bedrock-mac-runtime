@@ -11,11 +11,13 @@ public enum ManagedInstaller {
         let version: String?
         let code: String?
     }
-    public static func acquire(stage: URL, game: GameDefinition = .dungeons2, progress: @escaping @Sendable (OperationProgress) -> Void) async throws {
+    public static func acquire(stage: URL, game: GameDefinition = .dungeons2, version: String? = nil, experimental: Bool = false, progress: @escaping @Sendable (OperationProgress) -> Void) async throws {
+        let targetVersion = version ?? game.baseline
+        try game.validateInstallVersion(targetVersion, allowUntested: experimental)
         let helper = try NativeAccount.helperURL()
         try await Task.detached {
             let p = Process(); let pipe = Pipe()
-            p.executableURL = helper; p.arguments = ["install", stage.path, game.rawValue]
+            p.executableURL = helper; p.arguments = ["install", stage.path, game.rawValue, experimental ? "experimental" : "tested", targetVersion]
             p.environment = CrossOver.environment().filter { !["WINEDLLOVERRIDES", "WINEDEBUG", "XCURL_COMPAT_IDENTITY"].contains($0.key) }
             p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
             try p.run()
@@ -32,14 +34,20 @@ public enum ManagedInstaller {
                     if event.type == "progress", let phase = event.phase, let label = phases[phase], let done = event.completed, let total = event.total, done >= 0, total >= 0, total == 0 || done <= total {
                         if lastPhase != phase { try FileSafety.write(["phase":phase], to: stage.appendingPathComponent("operation-status.json")); lastPhase = phase }
                         progress(.init(label, completed: done, total: total))
-                    } else if event.type == "complete", event.version == game.baseline, !finished { finished = true }
-                    else if event.type == "error", let code = event.code, ["INSTALL_FAILED", "BEDROCK_VERSION_TOO_OLD", "BEDROCK_COMPATIBILITY_UNVERIFIED", "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED"].contains(code) { invalid = true; failureCode = code }
+                    } else if event.type == "complete", event.version == targetVersion, !finished { finished = true }
+                    else if event.type == "error", let code = event.code, ["INSTALL_FAILED", "BEDROCK_VERSION_TOO_OLD", "BEDROCK_COMPATIBILITY_UNVERIFIED", "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED", "PACKAGE_VERSION_CHANGED", "TESTED_PACKAGE_UNAVAILABLE", "SECURE_DOWNLOAD_UNAVAILABLE", "PACKAGE_DOWNLOAD_UNAVAILABLE", "PACKAGE_AUTHENTICITY_FAILED", "PACKAGE_FORMAT_UNSUPPORTED"].contains(code) { invalid = true; failureCode = code }
                     else { invalid = true }
                 }
                 if invalid || pending.count > 4096 { invalid = true; if p.isRunning { p.terminate() }; break }
             }
             p.waitUntilExit()
             guard p.terminationStatus == 0, finished, !invalid, pending.isEmpty else {
+                if failureCode == "PACKAGE_AUTHENTICITY_FAILED" { throw LauncherError(failureCode, "The downloaded package did not pass Microsoft's signature and content verification.", recovery: "No game files were installed. Retry the download; the existing installation is unchanged.") }
+                if failureCode == "PACKAGE_FORMAT_UNSUPPORTED" { throw LauncherError(failureCode, "This signed package uses a container layout the installer does not support yet.", recovery: "Use the tested version and report this error on GitHub.") }
+                if failureCode == "PACKAGE_DOWNLOAD_UNAVAILABLE" { throw LauncherError(failureCode, "Microsoft's game package could not be downloaded.", recovery: "Check the connection and retry. Your existing installation is unchanged.") }
+                if failureCode == "SECURE_DOWNLOAD_UNAVAILABLE" { throw LauncherError(failureCode, "A verified HTTPS source for this untested package could not be reached.", recovery: "Retry later or use the latest tested version. The existing installation is unchanged.") }
+                if failureCode == "PACKAGE_VERSION_CHANGED" { throw LauncherError(failureCode, "Microsoft's available version changed. Check for updates again before downloading.") }
+                if failureCode == "TESTED_PACKAGE_UNAVAILABLE" { throw LauncherError(failureCode, "Microsoft could not provide the latest tested package.", recovery: "Retry later. An already installed tested version remains available; no other version was downloaded instead.") }
                 throw LauncherError(failureCode, failureCode == "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED" ? "Microsoft did not supply a trusted SHA-256 for this Bedrock package revision. A reviewed package pin is required." : "The licensed download or extraction did not complete.", recovery: failureCode == "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED" ? "Use a launcher release with a reviewed pin for this Bedrock revision. Retrying sign-in or the connection cannot supply a missing pin. Your current version is preserved; interrupted Bedrock files are listed on the Bedrock page." : "Check the connection, Microsoft account and available storage, then retry. Your current version is preserved; interrupted files are listed in Storage.")
             }
         }.value

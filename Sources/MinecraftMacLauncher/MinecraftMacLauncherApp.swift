@@ -8,7 +8,7 @@ struct MinecraftMacLauncherApp: App {
     init() { NSApplication.shared.setActivationPolicy(.regular) }
     var body: some Scene {
         WindowGroup("Minecraft on Mac") { LauncherView().environmentObject(model).frame(minWidth: 900, minHeight: 650).task { await model.load(); NSApplication.shared.activate(ignoringOtherApps: true); if ProcessInfo.processInfo.arguments.contains("--smoke-launch-current") { await model.play() }; if ProcessInfo.processInfo.arguments.contains("--setup") { await model.installAndPlay() }; if ProcessInfo.processInfo.arguments.contains("--setup-bedrock") { await model.installAndPlay(game: .bedrock) }; if ProcessInfo.processInfo.arguments.contains("--repair-current"), let current = model.current { await model.repair(current); if model.error == nil { await model.play() } } } }
-        Settings { SettingsView().environmentObject(model).frame(width: 580, height: 440).padding(24) }
+        Settings { ScrollView { SettingsView().environmentObject(model).padding(24) }.frame(width: 640, height: 650) }
     }
 }
 enum Page: String, CaseIterable, Identifiable {
@@ -37,35 +37,48 @@ struct LauncherView: View {
             }.padding().frame(maxWidth: .infinity, alignment: .leading)
             }.navigationSplitViewColumnWidth(min: 210, ideal: 230, max: 270)
         } detail: {
-            VStack(spacing: 0) {
-                ScrollView {
-                    Group {
-                        switch page ?? .dungeons {
-                        case .dungeons: DungeonsView()
-                        case .bedrock: BedrockView()
-                        case .settings: SettingsView().padding(30)
+            // Keep the split column's size independent of the scroll content's
+            // minimum size. Expanding maintenance controls must not feed new
+            // constraints back into NSSplitView during its constraint update.
+            LauncherDetailViewport {
+                VStack(spacing: 0) {
+                    ScrollViewReader { scroll in
+                        ScrollView {
+                            Group {
+                                switch page ?? .dungeons {
+                                case .dungeons: GameView(game: .dungeons2, onNavigate: { scroll.scrollTo("game-top", anchor: .top) })
+                                case .bedrock: GameView(game: .bedrock, onNavigate: { scroll.scrollTo("game-top", anchor: .top) })
+                                case .settings: SettingsView().padding(30)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading).id("game-top")
                         }
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if let progress = model.progress {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text(progress.phase).font(.headline)
-                        if let fraction = progress.fraction { ProgressView(value: fraction) } else { ProgressView().controlSize(.small) }
-                        if progress.total > 0 { Text(progress.phase.contains("Downloading") || ["Preparing game files", "Verifying encrypted package"].contains(progress.phase) ? "\(ByteCountFormatter.string(fromByteCount: progress.completed, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: progress.total, countStyle: .file))" : "\(progress.completed) / \(progress.total) files").font(.caption).foregroundStyle(.secondary) }
-                    }.padding().frame(maxWidth: .infinity, alignment: .leading).background(.regularMaterial)
-                }
-                if !model.message.isEmpty { Text(model.message).font(.callout).foregroundStyle(.secondary).padding().frame(maxWidth: .infinity, alignment: .leading) }
-            }.background(Color(nsColor: .windowBackgroundColor))
+                        .onChange(of: page) { _, _ in scroll.scrollTo("game-top", anchor: .top) }
+                    }
+                    if let progress = model.progress {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(progress.phase).font(.headline)
+                            if let fraction = progress.fraction { ProgressView(value: fraction) } else { ProgressView().controlSize(.small) }
+                            if progress.total > 0 { Text(progress.phase.contains("Downloading") || ["Preparing game files", "Verifying encrypted package"].contains(progress.phase) ? "\(ByteCountFormatter.string(fromByteCount: progress.completed, countStyle: .file)) / \(ByteCountFormatter.string(fromByteCount: progress.total, countStyle: .file))" : "\(progress.completed) / \(progress.total) files").font(.caption).foregroundStyle(.secondary) }
+                        }.padding().frame(maxWidth: .infinity, alignment: .leading).background(.regularMaterial)
+                    }
+                    if !model.message.isEmpty { Text(model.message).font(.callout).foregroundStyle(.secondary).padding().frame(maxWidth: .infinity, alignment: .leading) }
+                }.background(Color(nsColor: .windowBackgroundColor))
+            }
         }
         .onChange(of: page, initial: true) { _, value in
             if value == .bedrock { model.selectedGame = .bedrock }
             else if value == .dungeons { model.selectedGame = .dungeons2 }
+            if value != .settings { model.offerTestedUpdate() }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in Task { await model.refresh() } }
-        .alert("Operation could not finish", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
+        .sheet(item: $model.testedUpdate) { update in
+            TestedReleaseUpdateView(update: update).environmentObject(model)
+        }
+        .alert("Operation could not finish", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } }), presenting: model.error) { error in
             Button("OK") { model.error = nil }
-            Button("Copy Details") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(model.error?.errorDescription ?? "", forType: .string) }
-        } message: { Text(model.error?.errorDescription ?? "") }
+            Button("Report on GitHub…") { model.open(ProjectSupport.issueURL(errorCode: error.code)) }
+            Button("Copy Details") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(error.errorDescription ?? "", forType: .string) }
+        } message: { error in Text((error.errorDescription ?? "") + "\n\nIf this keeps happening, please report it on GitHub.") }
     }
     func row(_ page: Page) -> some View {
         HStack(spacing: 12) {
@@ -80,11 +93,15 @@ struct LauncherView: View {
         }.padding(.vertical, 6).tag(page)
     }
 }
-struct DungeonsView: View {
-    var body: some View { GameView(game: .dungeons2) }
-}
-struct BedrockView: View {
-    var body: some View { GameView(game: .bedrock) }
+/// A split column fills the available viewport, regardless of expanded content.
+struct LauncherDetailViewport<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        GeometryReader { viewport in
+            content.frame(width: viewport.size.width, height: viewport.size.height)
+        }
+    }
 }
 
 enum LauncherArtwork {
@@ -96,14 +113,75 @@ enum LauncherArtwork {
     static let accent = Color(red: 0.32, green: 0.68, blue: 0.25)
 }
 
+enum GameSection: Equatable { case overview, versions, advanced }
+
 struct GameView: View {
     let game: GameDefinition
     @EnvironmentObject var model: AppModel
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var advanced = false
-    @State private var versions = false
+    private let onNavigate: () -> Void
+    @State private var section: GameSection
+    init(game: GameDefinition, initialSection: GameSection = .overview, onNavigate: @escaping () -> Void = {}) {
+        self.game = game
+        self.onNavigate = onNavigate
+        _section = State(initialValue: initialSection)
+    }
     private var installations: [Installation] { model.database.installations.filter { $0.game == game } }
     var body: some View {
+        Group {
+            switch section {
+            case .overview: overview
+            case .versions:
+                VStack(alignment: .leading, spacing: 24) {
+                    sectionHeader("Versions & Downloads")
+                    VersionsView(game: game, onNavigate: onNavigate)
+                }.padding(28)
+            case .advanced:
+                VStack(alignment: .leading, spacing: 24) {
+                    sectionHeader("Advanced")
+                    maintenance
+                }.padding(28)
+            }
+        }.id(game).onChange(of: section) { _, _ in onNavigate() }
+    }
+    private func sectionHeader(_ title: String) -> some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Button { section = .overview } label: {
+                Label("Back to \(game == .bedrock ? "Bedrock Edition" : "Dungeons II")", systemImage: "chevron.left")
+            }.buttonStyle(.borderless).accessibilityIdentifier("game.back")
+            VStack(alignment: .leading, spacing: 5) {
+                Text(game == .bedrock ? "BEDROCK EDITION" : "DUNGEONS II").font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(.secondary)
+                Text(title).font(.title.bold())
+            }
+        }
+    }
+    private var maintenance: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Maintenance").font(.title3.bold())
+            if let install = model.current(for: game) {
+                HStack {
+                    Button("Verify Files") { Task { await model.verify(install) } }.disabled(model.busy || model.running)
+                    Button("Repair") { Task { await model.repair(install) } }.disabled(!install.managed || model.busy || model.running)
+                    Button("Open Folder") { model.open(install.path) }
+                }.buttonStyle(.bordered)
+                LabeledContent("Environment", value: install.bottle)
+                LabeledContent("Storage", value: ByteCountFormatter.string(fromByteCount: install.storageBytes ?? install.diskBytes, countStyle: .file))
+                Text(install.path.path).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+            HStack {
+                Button("Open Versions & Downloads") { section = .versions }
+            }.disabled(model.busy || model.running)
+            AccountView(game: game)
+            GameImportOptionsView(game: game)
+            if game == .bedrock {
+                Text("Bedrock 1.26.5203.0 · CrossOver 26.3.x · D3DMetal").font(.caption).foregroundStyle(.secondary)
+                Text("Back up worlds before changing versions. Choosing an older game version does not restore world data.").font(.callout).foregroundStyle(.secondary)
+                BedrockStorageView()
+            }
+            Text("File verification checks the installation and runtime. Gameplay, saves and multiplayer require separate live testing.").font(.caption).foregroundStyle(.secondary)
+            Link("Microsoft GDK license", destination: URL(string: "https://github.com/microsoft/GDK/blob/main/LICENSE.md")!)
+        }
+    }
+    private var overview: some View {
         VStack(alignment: .leading, spacing: 0) {
             GeometryReader { geometry in
                 Image(nsImage: LauncherArtwork.image(game == .bedrock ? "bedrock" : "dungeons", extension: "jpg"))
@@ -124,20 +202,19 @@ struct GameView: View {
             VStack(alignment: .leading, spacing: 24) {
                 HStack(spacing: 20) {
                     if !installations.isEmpty {
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("SELECT VERSION").font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(.secondary)
-                            Picker("Select version", selection: Binding<UUID?>(get: { model.current(for: game)?.id }, set: { id in
-                                if let install = installations.first(where: { $0.id == id }) { Task { await model.select(install) } }
-                            })) {
-                                if model.current(for: game) == nil { Text("Choose a version").tag(nil as UUID?) }
-                                ForEach(installations) { item in
-                                    Text("\(item.version) · \(item.displayKind) · \(item.id.uuidString.prefix(4))").tag(Optional(item.id)).disabled(item.state != .ready)
+                        Button { section = .versions } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("SELECT VERSION").font(.system(size: 10, weight: .bold)).tracking(1.5).foregroundStyle(.secondary)
+                                HStack(spacing: 10) {
+                                    Text(model.current(for: game)?.version ?? "Choose a version").font(.title3.weight(.semibold)).monospacedDigit()
+                                    Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                                 }
-                            }.labelsHidden().frame(maxWidth: 320).disabled(model.busy || model.running)
-                        }
+                                Text("Manage versions & updates").font(.caption).foregroundStyle(.secondary)
+                            }.contentShape(Rectangle())
+                        }.buttonStyle(.plain).accessibilityIdentifier("versions.toggle")
                         Spacer(minLength: 0)
                         VStack(alignment: .trailing, spacing: 5) {
-                            Text(model.current(for: game).map { $0.state == .ready ? "Ready to play" : "Verification needed" } ?? "Choose a version").font(.callout.weight(.medium))
+                            Text(model.current(for: game).map { $0.state != .ready ? "Verification needed" : $0.usesUntestedVersion ? "Not tested · may work" : "Ready to play" } ?? "Choose a version").font(.callout.weight(.medium))
                             Text(model.accounts[game]?.gamertag ?? "Microsoft account").font(.caption).foregroundStyle(.secondary)
                         }
                     } else {
@@ -149,9 +226,9 @@ struct GameView: View {
                     }
                     Button { Task {
                         if model.current(for: game) != nil { await model.play(game: game) }
-                        else { await model.installAndPlay(game: game) }
+                        else { section = .versions }
                     } } label: {
-                        Label(model.runningGames.contains(game) ? "Game running" : model.current(for: game) == nil ? "Install & Play" : "Play", systemImage: "play.fill")
+                        Label(model.runningGames.contains(game) ? "Game running" : model.current(for: game) != nil ? "Play" : installations.isEmpty ? "Install a Version" : "Select Version", systemImage: "play.fill")
                             .font(.system(size: 16, weight: .bold)).frame(minWidth: 125).padding(.vertical, 9)
                     }.buttonStyle(.borderedProminent).tint(LauncherArtwork.accent)
                         .disabled(model.busy || model.running)
@@ -165,48 +242,20 @@ struct GameView: View {
                             .accessibilityLabel("Force quit \(game.name)")
                     }
                 }
-                if model.current(for: game) == nil {
+                if installations.isEmpty {
                     Label("Requires licensed CrossOver, game ownership and 35 GB of free space.", systemImage: "info.circle")
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Divider()
                 HStack {
-                    Button { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { versions.toggle() } } label: {
-                        Label("Versions", systemImage: "square.stack.3d.up")
-                    }.buttonStyle(.bordered)
+                    Button { section = .versions } label: {
+                        Label("Versions & Downloads", systemImage: "square.stack.3d.up")
+                    }.buttonStyle(.borderless)
                     Text("\(installations.count) installed").font(.caption).foregroundStyle(.secondary)
                     Spacer()
-                    Button { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { advanced.toggle() } } label: {
-                        Label("Advanced", systemImage: advanced ? "chevron.up" : "chevron.down")
+                    Button { section = .advanced } label: {
+                        Label("Advanced", systemImage: "gearshape")
                     }.buttonStyle(.borderless).foregroundStyle(.secondary)
-                }
-                if versions { VersionsView(game: game).transition(.opacity.combined(with: .move(edge: .top))) }
-                if advanced {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text("Game settings & maintenance").font(.title3.bold())
-                        if let install = model.current(for: game) {
-                            HStack {
-                                Button("Verify Files") { Task { await model.verify(install) } }.disabled(model.busy || model.running)
-                                Button("Repair") { Task { await model.repair(install) } }.disabled(!install.managed || model.busy || model.running)
-                                Button("Open Folder") { model.open(install.path) }
-                            }.buttonStyle(.bordered)
-                            LabeledContent("Environment", value: install.bottle)
-                            LabeledContent("Storage", value: ByteCountFormatter.string(fromByteCount: install.storageBytes ?? install.diskBytes, countStyle: .file))
-                            Text(install.path.path).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                        }
-                        HStack {
-                            Button("Install a Fresh Copy") { Task { await model.installAndPlay(game: game) } }
-                            Button("Check for Updates") { Task { await model.checkUpdates(game: game) } }
-                        }.disabled(model.busy || model.running)
-                        AccountView(game: game)
-                        if game == .bedrock {
-                            Text("Bedrock 1.26.5203.0 · CrossOver 26.3.x · D3DMetal").font(.caption).foregroundStyle(.secondary)
-                            Text("Back up worlds before changing versions. Choosing an older game version does not restore world data.").font(.callout).foregroundStyle(.secondary)
-                            BedrockStorageView()
-                        }
-                        Text("File verification checks the installation and runtime. Gameplay, saves and multiplayer require separate live testing.").font(.caption).foregroundStyle(.secondary)
-                        Link("Microsoft GDK license", destination: URL(string: "https://github.com/microsoft/GDK/blob/main/LICENSE.md")!)
-                    }.transition(.opacity.combined(with: .move(edge: .top)))
                 }
                 Text("Unofficial launcher · Not affiliated with Mojang or Microsoft").font(.system(size: 10)).foregroundStyle(.tertiary)
             }.padding(28)
@@ -257,59 +306,38 @@ struct VersionsView: View {
     @State private var pendingRemoval: Installation?
     @State private var removeEnvironment = false
     @State private var cloneConfirmation: Installation?
-    @State private var clearCurrent = false
+    private var installationsAreEmpty: Bool { !model.database.installations.contains { $0.game == game } }
+    @State private var tab: VersionTab
+    private let onNavigate: () -> Void
+    enum VersionTab: String, CaseIterable { case installed = "Installed", downloads = "Install a Version" }
+    init(game: GameDefinition, initialTab: VersionTab = .installed, onNavigate: @escaping () -> Void = {}) {
+        self.game = game
+        self.onNavigate = onNavigate
+        _tab = State(initialValue: initialTab)
+    }
+    private var installationIDs: Set<UUID> { Set(model.database.installations.filter { $0.game == game }.map(\.id)) }
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Versions").font(.title2.bold())
-            Text("Choose the installation used by Play. Each game keeps its own selection.").foregroundStyle(.secondary)
-            ForEach(model.database.installations.filter { $0.game == game }) { install in
-                GroupBox {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack {
-                            Text("\(install.game.name) • \(install.version)").font(.title2.bold())
-                            if install.id == model.database.currentByGameId[install.gameId] { Text("Current").font(.caption.bold()).padding(5).background(.green.opacity(0.15), in: Capsule()) }
-                            Spacer(); Text(install.displayKind).foregroundStyle(.secondary)
-                        }
-                        Text("\(ByteCountFormatter.string(fromByteCount: install.storageBytes ?? install.diskBytes, countStyle: .file)) of files • \(install.state.rawValue)").font(.callout).foregroundStyle(.secondary)
-                        HStack {
-                            Button("Use This Version") { Task { await model.select(install) } }
-                                .disabled(install.id == model.database.currentByGameId[install.gameId] || install.state != .ready)
-                            Spacer()
-                            Menu {
-                                Button("Show in Finder") { NSWorkspace.shared.open(install.managed ? install.path.deletingLastPathComponent() : install.path) }
-                                Button("Verify Files") { Task { await model.verify(install) } }
-                                Button("Create Snapshot…") { cloneConfirmation = install }
-                                Divider()
-                                Button(install.managed ? "Delete Version…" : "Unregister…", role: .destructive) { removeEnvironment = false; pendingRemoval = install }
-                            } label: { Label("Manage", systemImage: "ellipsis") }
-                        }.disabled(model.busy || model.running)
-                        DisclosureGroup("Installation details") {
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(install.managed ? "Deletion includes this version's files and component cache." : "External installation. Unregistering keeps the original files.")
-                                Text(install.path.path).font(.caption.monospaced()).textSelection(.enabled)
-                                LabeledContent("Environment", value: install.bottle)
-                            }.font(.caption).foregroundStyle(.secondary).padding(.top, 8)
-                        }
-                        if model.developerMode { Text(install.compatibilityProfile).font(.caption.monospaced()) }
-                    }.padding(10)
+        VStack(alignment: .leading, spacing: 24) {
+            Picker("Versions workspace", selection: $tab) {
+                ForEach(VersionTab.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+            }.pickerStyle(.segmented).labelsHidden().tint(LauncherArtwork.accent).accessibilityIdentifier("versions.workspace")
+            switch tab {
+            case .installed:
+                installedVersions
+            case .downloads:
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Install a version").font(.title3.bold())
+                    Text("Choose the tested release, or check Microsoft for a newer version to try.").font(.callout).foregroundStyle(.secondary)
                 }
+                LatestTestedReleaseView(game: game)
+                Divider()
+                VersionAvailabilityView(game: game)
             }
-            if model.database.installations.filter({ $0.game == game }).isEmpty { Text("No registered installations.").foregroundStyle(.secondary) }
-            DisclosureGroup("Advanced version options") {
-                VStack(alignment: .leading, spacing: 12) {
-                    if game == .dungeons2 {
-                        BottlePicker()
-                        Button("Register Existing Installation…") { model.chooseInstallation() }.disabled(model.busy || model.selectedBottle.isEmpty || model.running)
-                    }
-                    if let current = model.current(for: game) {
-                        if game == .dungeons2 {
-                            Button("Change Bottle") { Task { await model.perform { try await model.store?.changeBottle(current.id, bottle: model.selectedBottle) } } }.disabled(model.busy || model.running)
-                        }
-                        Button("Clear Current Selection…") { clearCurrent = true }.disabled(model.busy || model.running)
-                    }
-                }.padding(.top, 12)
-            }
-
+        }
+        .onAppear { if installationsAreEmpty { tab = .downloads } }
+        .onChange(of: tab) { _, _ in onNavigate() }
+        .onChange(of: installationIDs) { old, new in
+            if !new.subtracting(old).isEmpty { tab = .installed }
         }
         .sheet(item: $pendingRemoval) { install in
             VStack(alignment: .leading, spacing: 16) {
@@ -335,15 +363,106 @@ struct VersionsView: View {
         .confirmationDialog("Create a managed snapshot?", isPresented: Binding(get: { cloneConfirmation != nil }, set: { if !$0 { cloneConfirmation = nil } }), titleVisibility: .visible) {
             if let install = cloneConfirmation { Button("Clone and Verify") { Task { await model.clone(install) }; cloneConfirmation = nil } }
         } message: { Text("Copies this local installation using APFS copy-on-write and hashes all game files. This can take several minutes. Current selection stays available.") }
+
+    }
+    private var installedVersions: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Installed versions").font(.title3.bold())
+                    Text("Select a version for Play, then start it here.").font(.callout).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+                if let current = model.current(for: game) {
+                    Button { Task { await model.play(game: game) } } label: {
+                        Label("Play \(current.version)", systemImage: "play.fill")
+                    }.buttonStyle(.borderedProminent).tint(LauncherArtwork.accent)
+                        .disabled(current.state != .ready || model.busy || model.running)
+                }
+            }
+            if installationsAreEmpty {
+                VStack(alignment: .leading, spacing: 12) {
+                    Text("No versions installed yet.").foregroundStyle(.secondary)
+                    Button("Install a Version") { tab = .downloads }.buttonStyle(.borderedProminent).tint(LauncherArtwork.accent)
+                }
+            }
+            ForEach(VersionAvailability.sorted(model.database.installations, game: game)) { install in
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .center, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 8) {
+                                Text(install.version).font(.headline).monospacedDigit()
+                                if install.usesUntestedVersion {
+                                    Label("Not tested · may work", systemImage: "flask").font(.caption).foregroundStyle(.secondary)
+                                } else if install.version == game.baseline {
+                                    Text("Latest tested").font(.caption).foregroundStyle(.secondary)
+                                }
+                                if install.id == model.database.currentByGameId[install.gameId] {
+                                    Image(systemName: "checkmark.circle.fill").foregroundStyle(LauncherArtwork.accent).accessibilityLabel("Selected for Play")
+                                }
+                            }
+                            Text("\(install.displayKind) · \(ByteCountFormatter.string(fromByteCount: install.storageBytes ?? install.diskBytes, countStyle: .file))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if install.state != .ready {
+                                Label("Verification needed", systemImage: "exclamationmark.circle").font(.caption).foregroundStyle(.orange)
+                            }
+                        }
+                        Spacer(minLength: 0)
+                        Button(install.id == model.current(for: game)?.id ? "Selected" : "Select for Play") { Task { await model.select(install) } }
+                            .disabled(install.id == model.database.currentByGameId[install.gameId] || install.state != .ready || model.busy || model.running)
+                        Menu {
+                            Button("Show in Finder") { NSWorkspace.shared.open(install.managed ? install.path.deletingLastPathComponent() : install.path) }
+                            Button("Verify Files") { Task { await model.verify(install) } }
+                            Button("Create Snapshot…") { cloneConfirmation = install }
+                            Divider()
+                            Button(install.managed ? "Delete Version…" : "Unregister…", role: .destructive) { removeEnvironment = false; pendingRemoval = install }
+                        } label: { Image(systemName: "ellipsis") }
+                        .menuStyle(.borderlessButton).fixedSize().help("Manage version \(install.version)")
+                        .disabled(model.busy || model.running)
+                    }
+                    DisclosureGroup("Details") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(install.managed ? "Removing this version keeps your saves unless you explicitly choose to delete its environment." : "External installation. Unregistering keeps the original files.")
+                            Text(install.path.path).font(.caption.monospaced()).textSelection(.enabled)
+                            LabeledContent("Environment", value: install.bottle)
+                            if model.developerMode { Text(install.compatibilityProfile).font(.caption.monospaced()) }
+                        }.font(.caption).foregroundStyle(.secondary).padding(.top, 8)
+                    }.font(.caption).foregroundStyle(.secondary)
+                }.padding(.vertical, 4)
+                Divider()
+            }
+        }
+    }
+
+}
+struct GameImportOptionsView: View {
+    let game: GameDefinition
+    @EnvironmentObject var model: AppModel
+    @State private var clearCurrent = false
+    var body: some View {
+        DisclosureGroup("Import & selection options") {
+            VStack(alignment: .leading, spacing: 12) {
+                if game == .dungeons2 {
+                    BottlePicker()
+                    Button("Register Existing Installation…") { model.chooseInstallation() }.disabled(model.busy || model.selectedBottle.isEmpty || model.running)
+                }
+                if let current = model.current(for: game) {
+                    if game == .dungeons2 {
+                        Button("Change Bottle") { Task { await model.perform { try await model.store?.changeBottle(current.id, bottle: model.selectedBottle) } } }.disabled(model.busy || model.running)
+                    }
+                    Button("Clear Current Selection…") { clearCurrent = true }.disabled(model.busy || model.running)
+                }
+            }.padding(.top, 12)
+        }
         .confirmationDialog("Clear current selection?", isPresented: $clearCurrent, titleVisibility: .visible) {
             Button("Clear Selection") { Task { await model.perform { try await model.store?.clearSelection(game: game) } } }
-        } message: { Text("Play will be unavailable until you select another version. You can then remove the previous version.") }
+        } message: { Text("Select an installed version in Versions & Downloads to enable Play again.") }
     }
 }
 struct DownloadsView: View {
     var body: some View {
         ContentUnavailableView { Label("Downloads", systemImage: "arrow.down.circle") } description: {
-            Text("Downloads and preparation appear here while the launcher installs a game. Start with Sign In, Install & Play on the game page.")
+            Text("Open Versions & Downloads → Install a Version on the game page to choose a download.")
         }
     }
 }
@@ -394,6 +513,13 @@ struct SettingsView: View {
                 }.padding(8)
             }
             Text("No telemetry. Credentials are never included in diagnostics. Native Microsoft credentials use a separate macOS Keychain namespace. The reference game retains its existing login.").font(.caption).foregroundStyle(.secondary)
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Link("Report a problem on GitHub ↗", destination: ProjectSupport.issueURL())
+                Text("Built with assistance from AI. AI tools also assisted the reverse engineering and compatibility research behind this project.")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
+
         }
         .confirmationDialog("Permanently delete this environment and all its saves?", isPresented: Binding(get: { pendingEnvironment != nil }, set: { if !$0 { pendingEnvironment = nil } }), titleVisibility: .visible) {
             if let name = pendingEnvironment { Button("Delete Environment and Saves", role: .destructive) { pendingEnvironment = nil; Task { await model.perform { try await model.store?.removeRetainedEnvironment(name) } } } }

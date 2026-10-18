@@ -20,7 +20,7 @@ Live testing found and fixed Store composite version parsing, missing FileHash, 
 
 The user confirmed gameplay in the fresh installation. Native UI automation is unavailable (Sky Computer Use native pipe closed before response), so that visual evidence is user confirmation, not an automated screenshot. The game was left running for the user; it was not forcibly stopped.
 
-Remaining boundaries: independent second Apple Silicon Mac, real multi-version Store update/rollback, full save/restart persistence cycle, Intel support, download range resume, and Developer ID/hardened runtime/notarization. Only the pinned 1.1.1.0 build is supported. CrossOver must separately be installed/licensed. This is a private preview, not a public notarized release.
+Remaining boundaries: independent second Apple Silicon Mac, real multi-version Store update/rollback, full save/restart persistence cycle, Intel support, download range resume, and Developer ID/hardened runtime/notarization. The original acceptance below concerns 1.1.1.0; the 2026-10-18 catalog also supports 1.1.2.0 (see MANAGED-INSTALLATION.md for its package review and user-reported gameplay test). CrossOver must separately be installed/licensed. This is a private preview, not a public notarized release.
 
 ## 0.2.1 version management
 

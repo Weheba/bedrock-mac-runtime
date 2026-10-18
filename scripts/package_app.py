@@ -64,11 +64,11 @@ for resource in bin_dir.glob('*.bundle'):
   subprocess.run(['codesign','--force','--sign','-',str(app/'Contents/Resources'/resource.name)],check=True)
 if restored_bedrock_bundles!=1:raise SystemExit('Expected exactly one Bedrock runtime resource bundle.')
 notices=app/'Contents/Resources/Notices';notices.mkdir()
-for source,name in [('Compatibility/Bedrock/LICENSE','WineGDK-LGPL-LICENSE'),('docs/BEDROCK.md','BEDROCK.md'),('LICENSE','LICENSE'),('docs/VENDOR.md','VENDOR.md'),('docs/MANAGED-INSTALLATION.md','MANAGED-INSTALLATION.md'),('Compatibility/Runtime/LICENSE','Runtime-MIT-LICENSE'),('Compatibility/XCurl/LICENSE','XCurl-MIT-LICENSE')]:
+for source,name in [('Compatibility/Bedrock/LICENSE','WineGDK-LGPL-LICENSE'),('docs/BEDROCK.md','BEDROCK.md'),('LICENSE','LICENSE'),('docs/VENDOR.md','VENDOR.md'),('docs/MANAGED-INSTALLATION.md','MANAGED-INSTALLATION.md'),('docs/INSTALL.md','INSTALL.md'),('docs/DOWNLOAD-VERIFICATION.md','DOWNLOAD-VERIFICATION.md'),('NativeHelper/src/trust/README.md','Microsoft-Retail-Signing-Anchor.md'),('Compatibility/Runtime/LICENSE','Runtime-MIT-LICENSE'),('Compatibility/XCurl/LICENSE','XCurl-MIT-LICENSE')]:
  shutil.copy2(root/source,notices/name)
 subprocess.run(['python3',str(root/'scripts/collect_notices.py'),str(notices)],check=True)
 # Xcode's SwiftPM engine produces resource .bundle directories alongside executable.
-info={'CFBundleIdentifier':'org.minecraftmac.launcher.preview','CFBundleName':'Minecraft on Mac','CFBundleDisplayName':'Minecraft on Mac','CFBundleExecutable':'MinecraftMacLauncher','CFBundleIconFile':'LauncherMac','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.3.1','CFBundleVersion':'5','LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,'NSPrincipalClass':'NSApplication','LSApplicationCategoryType':'public.app-category.games'}
+info={'CFBundleIdentifier':'org.minecraftmac.launcher.preview','CFBundleName':'Minecraft on Mac','CFBundleDisplayName':'Minecraft on Mac','CFBundleExecutable':'MinecraftMacLauncher','CFBundleIconFile':'LauncherMac','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.4.0','CFBundleVersion':'6','LSMinimumSystemVersion':'14.0','NSHighResolutionCapable':True,'NSPrincipalClass':'NSApplication','LSApplicationCategoryType':'public.app-category.games'}
 shutil.copy2(root/'Sources/MinecraftMacLauncher/Resources/Artwork/LauncherMac.icns',app/'Contents/Resources/LauncherMac.icns')
 (app/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
 subprocess.run(['codesign','--force','--sign','-',str(app)],check=True)

@@ -84,11 +84,16 @@ public actor LibraryStore {
         try next.validate(); try FileSafety.write(next, to: databaseURL); database = next
     }
     public func verify(_ install: Installation, progress: @Sendable (OperationProgress) -> Void = { _ in }) throws -> Installation {
-        let profile = install.isOfficialManaged ? try CompatibilityProfile.managed(for: install.game) : self.profile
+        let profile = install.isOfficialManaged ? try CompatibilityProfile.forInstallation(install) : self.profile
         guard profile.gameId == install.gameId else { throw LauncherError("GAME_IDENTITY_INVALID", "Compatibility profile belongs to another game.") }
-        try install.game.validateVersion(install.version)
+        try install.game.validateInstallVersion(install.version, allowUntested: install.usesUntestedVersion)
         guard try FileSafety.version(install.path, game: install.game) == profile.version, install.version == profile.version else {
             throw LauncherError("COMPATIBILITY_UNVERIFIED", "This build has no verified compatibility profile.", recovery: "Keep using the current verified build. Do not apply its DLLs to this build.")
+        }
+        if install.isOfficialManaged {
+            guard try FileSafety.isX64PE(FileSafety.child(install.game.executable, of: install.path)) else {
+                throw LauncherError("ARCHITECTURE_INVALID", "The game executable is not x86_64 PE.")
+            }
         }
         if install.managed {
             let versions = try versionsRoot(install.game)
@@ -96,7 +101,7 @@ public actor LibraryStore {
             let allowed = ["\(install.version)-\(install.id.uuidString)", ".staging-\(install.id.uuidString)"]
             guard parent.deletingLastPathComponent().path == versions.path, allowed.contains(parent.lastPathComponent), install.path.lastPathComponent == "Game" else { throw LauncherError("MANIFEST_MISMATCH", "Managed installation escaped its game root.") }
             let receipt = try JSONDecoder().decode(Installation.self, from: Data(contentsOf: FileSafety.child("metadata.json", of: parent)))
-            guard receipt.id == install.id, receipt.gameId == install.gameId, receipt.storeId == install.storeId, receipt.bottle == install.bottle, receipt.managed else { throw LauncherError("MANIFEST_MISMATCH", "Managed installation receipt differs.") }
+            guard receipt.id == install.id, receipt.gameId == install.gameId, receipt.storeId == install.storeId, receipt.bottle == install.bottle, receipt.managed, receipt.version == install.version, receipt.usesUntestedVersion == install.usesUntestedVersion else { throw LauncherError("MANIFEST_MISMATCH", "Managed installation receipt differs.") }
         }
         var verified = install
         let hashes = install.hashes.isEmpty ? profile.hashes : install.hashes
@@ -181,6 +186,7 @@ public actor LibraryStore {
         try fm.createDirectory(at: stage, withIntermediateDirectories: false)
         let destination = stage.appendingPathComponent("Game")
         var install = Installation(id: newID, game: source.game, version: source.version, path: destination, bottle: source.bottle, managed: true, compatibilityProfile: source.compatibilityProfile)
+        install.experimental = source.experimental
         try FileSafety.write(install, to: stage.appendingPathComponent("metadata.json"))
         do {
             progress(.init("Cloning local installation"))
@@ -217,10 +223,12 @@ public actor LibraryStore {
         }
     }
     /// Prepare, test and commit a new official package without changing the working selection on failure.
-    public func install(game definition: GameDefinition = .dungeons2, progress: @escaping @Sendable (OperationProgress) -> Void = { _ in }) async throws -> Installation {
+    public func install(game definition: GameDefinition = .dungeons2, version requestedVersion: String? = nil, experimental: Bool = false, selectForPlay: Bool = true, progress: @escaping @Sendable (OperationProgress) -> Void = { _ in }) async throws -> Installation {
         try checkIdle(); busy = true; defer { busy = false }
         guard let crossOver = self.crossOver ?? .detect() else { throw LauncherError("CROSSOVER_MISSING", "Install and license CrossOver first.", recovery: "Open Settings for the official CrossOver download. No developer tools are needed.") }
-        let profile = try CompatibilityProfile.managed(for: definition)
+        let targetVersion = requestedVersion ?? definition.baseline
+        let experimental = experimental && !definition.isTestedVersion(targetVersion)
+        let profile = try CompatibilityProfile.forVersion(game: definition, version: targetVersion, experimental: experimental)
         if definition == .bedrock { try crossOver.requireBedrockVersion() }
         guard let assets = Bundle.module.url(forResource: "Managed", withExtension: nil, subdirectory: "Resources") else { throw LauncherError("COMPONENT_MISSING", "Use the complete packaged app.") }
         let capacity = try root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]).volumeAvailableCapacityForImportantUsage ?? 0
@@ -228,9 +236,18 @@ public actor LibraryStore {
         let id = UUID(); let stage = try FileSafety.child(".staging-\(id.uuidString)", of: versionsRoot(definition))
         try fm.createDirectory(at: stage, withIntermediateDirectories: false, attributes: [.posixPermissions:0o700])
         let game = stage.appendingPathComponent("Game")
-        var install = Installation(id: id, game: definition, version: profile.version, path: game, bottle: database.installations.first(where: { $0.gameId == definition.rawValue && $0.isOfficialManaged })?.bottle ?? database.retainedEnvironmentsByGameId[definition.rawValue]?.first ?? (definition == .dungeons2 ? "MinecraftMac-\(id.uuidString)" : "MinecraftMac-bedrock-\(id.uuidString)"), managed: true, state: .preparing, compatibilityProfile: profile.id)
+        let retained = database.retainedEnvironmentsByGameId[definition.rawValue]?.first { name in
+            guard let bottle = try? crossOver.bottleURL(name),
+                  let data = try? Data(contentsOf: bottle.appendingPathComponent("minecraftmac-owner.json")),
+                  let owner = try? JSONDecoder().decode([String: String].self, from: data) else { return false }
+            return owner["experimental"] != "true"
+        }
+        let workingBottle = database.installations.first { $0.game == definition && $0.isOfficialManaged && !$0.usesUntestedVersion }?.bottle ?? retained
+        let newBottle = definition == .dungeons2 ? "MinecraftMac-\(id.uuidString)" : "MinecraftMac-bedrock-\(id.uuidString)"
+        var install = Installation(id: id, game: definition, version: profile.version, path: game, bottle: experimental ? newBottle : (workingBottle ?? newBottle), managed: true, state: .preparing, compatibilityProfile: profile.id)
+        install.experimental = experimental ? true : nil
         try FileSafety.write(install, to: stage.appendingPathComponent("metadata.json"))
-        try await ManagedInstaller.acquire(stage: stage, game: definition, progress: progress)
+        try await ManagedInstaller.acquire(stage: stage, game: definition, version: targetVersion, experimental: experimental, progress: progress)
         try Task.checkCancellation(); try FileSafety.validateTree(stage)
         struct Receipt: Decodable { let schema: Int; let version: String; let revision: String?; let gameId: String; let storeId: String; let materialization: String; let hashes: [String:String] }
         let receipt = try JSONDecoder().decode(Receipt.self, from: Data(contentsOf: FileSafety.child("download-receipt.json", of: stage)))
@@ -275,6 +292,12 @@ public actor LibraryStore {
         progress(.init("Preparing CrossOver environment"))
         try await ManagedInstaller.provisionBottle(install.bottle, crossOver: crossOver, components: stage.appendingPathComponent("Components"), runtime: runtime, owner: UUID(uuidString: String(install.bottle.dropFirst("MinecraftMac-".count))) ?? id)
         }
+        if experimental {
+            let ownerURL = try crossOver.bottleURL(install.bottle).appendingPathComponent("minecraftmac-owner.json")
+            var owner = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: ownerURL))
+            owner["experimental"] = "true"
+            try FileSafety.write(owner, to: ownerURL)
+        }
         install.state = .testing
         try FileSafety.write(install, to: stage.appendingPathComponent("metadata.json"))
         let walk = fm.enumerator(at: game, includingPropertiesForKeys: [.isRegularFileKey])
@@ -289,7 +312,8 @@ public actor LibraryStore {
         install.path = final.appendingPathComponent("Game")
         try FileSafety.write(install, to: stage.appendingPathComponent("metadata.json"))
         try fm.moveItem(at: stage, to: final)
-        var next = database; next.installations.append(install); next.currentByGameId[install.gameId] = install.id
+        var next = database; next.installations.append(install)
+        if selectForPlay && !experimental { next.currentByGameId[install.gameId] = install.id }
         next.retainedEnvironmentsByGameId[install.gameId]?.removeAll { $0 == install.bottle }
         do { try persist(next) } catch { try? fm.moveItem(at: final, to: stage); throw error }
         progress(.init("Ready to play", completed: 1, total: 1)); return install
@@ -399,7 +423,7 @@ public actor LibraryStore {
         let bottle = try crossOver.bottleURL(install.bottle)
         let owner = try JSONDecoder().decode([String:String].self, from: Data(contentsOf: FileSafety.child("minecraftmac-owner.json", of: bottle)))
         guard owner["schema"] == "1", let ownerID = owner["owner"], UUID(uuidString: ownerID) != nil, install.bottle == "MinecraftMac-\(ownerID)" else { throw LauncherError("MANIFEST_MISMATCH", "The CrossOver environment is not owned by this launcher.") }
-        let profile = try CompatibilityProfile.managed()
+        let profile = try CompatibilityProfile.forInstallation(install)
         guard install.version == profile.version, let assets = Bundle.module.url(forResource: "Managed", withExtension: nil, subdirectory: "Resources") else { throw LauncherError("COMPATIBILITY_UNVERIFIED", "No bundled repair profile is available.") }
         // Before touching compatibility files, verify all recorded game data and resources.
         let allowed = Set(profile.hashes.keys.filter { $0.hasSuffix(".dll") }).union(["xgameruntime.dll"])
