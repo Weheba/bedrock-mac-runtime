@@ -39,6 +39,11 @@ impl Reply {
 async fn main() {
     // Upstream panics may include response contents. Never emit their payload.
     std::panic::set_hook(Box::new(|_| {}));
+    // Never let the keychain ask for the login password. Items written by an earlier,
+    // differently signed build fail fast instead and are replaced (see KeychainBackend),
+    // which costs one sign-in after an update rather than a prompt per item and read.
+    #[cfg(target_os = "macos")]
+    let _keychain_ui = security_framework::os::macos::keychain::SecKeychain::disable_user_interaction().ok();
     let command = std::env::args().nth(1).unwrap_or_default();
     if command == "install" {
         let stage=std::env::args().nth(2).unwrap_or_default();
@@ -115,10 +120,13 @@ async fn run(command: &str, game_id: &str) -> Reply {
     let tokens = TokenManager::with_keychain_and_memory();
     if command == "logout" {
         // Only this helper's private namespace. Never the reference game account.
+        // Delete without reading first: reading an item from an older build is what prompts.
         for key in ["dev_license", "device-tokens", "user-tokens", "user-DA"] {
-            if let Ok(entry) = xodus::secrets::get_entry(key) {
-                if entry.get_secret().is_ok() && entry.delete_credential().is_err() { return Reply::failure("SIGN_OUT_FAILED"); }
-            } else { return Reply::failure("SIGN_OUT_FAILED"); }
+            let Ok(entry) = xodus::secrets::get_entry(key) else { return Reply::failure("SIGN_OUT_FAILED"); };
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring_core::Error::NoEntry) => {}
+                Err(_) => return Reply::failure("SIGN_OUT_FAILED"),
+            }
         }
         return Reply::signed_out();
     }

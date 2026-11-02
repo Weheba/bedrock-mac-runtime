@@ -22,8 +22,8 @@ pre-existing game folder or copied CrossOver bottle is needed.
    If macOS blocks it, use System Settings → Privacy & Security → Open Anyway for
    this downloaded app, then confirm Open. Do not disable Gatekeeper globally.
 4. Choose Dungeons II or Bedrock Edition and Install & Play. Complete Microsoft
-   sign-in in Microsoft's window; approve macOS Keychain access for the bundled
-   helper if requested. No account, game license or CrossOver license is bundled.
+   sign-in in Microsoft's window. The helper never asks for your login keychain
+   password. No account, game license or CrossOver license is bundled.
 5. The launcher verifies ownership, downloads the official package and required
    Microsoft components, verifies integrity, extracts persistent game files,
    prepares its own CrossOver environment, then runs readiness checks.
@@ -40,6 +40,13 @@ release, then reopen it. Keep your library and CrossOver environments. If an old
 game version is selected, the launcher offers Download & Select, or Select for
 Play when the tested version is already installed. Later postpones the offer.
 Existing Dungeons 1.1.2.0 trial installations are recognized as tested automatically.
+
+Ad-hoc signed builds get a new code identity on every release, so a new helper
+cannot read the Microsoft sign-in it stored before. It replaces those keychain
+items instead of prompting, so expect to sign in once after each update. Releases
+signed with a stable Developer ID keep keychain access across updates; sign the
+helper and the app with the same identity for every release to avoid the extra
+sign-in.
 
 ## Storage and support
 
