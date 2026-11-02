@@ -21,8 +21,8 @@ pub fn run() -> io::Result<()> {
    if !credential_bridge::permitted(&request.key) {return Err(failure())}
    let entry=xodus::secrets::get_entry(&request.key).map_err(|_|failure())?;
    match request.op.as_str() {
-    "get" if request.value.is_none()=> match entry.get_secret() {Ok(v)=>Ok(Some(v)),Err(keyring_core::Error::NoEntry)=>Ok(None),Err(_)=>Err(failure())},
-    "set"=>{let v=request.value.ok_or_else(failure)?;if v.len()>512*1024 {return Err(failure())}entry.set_secret(&v).map_err(|_|failure())?;Ok(None)},
+    "get" if request.value.is_none()=> xodus::secrets::get_secret_or_absent(&entry).map_err(|_|failure()),
+    "set"=>{let v=request.value.ok_or_else(failure)?;if v.len()>512*1024 {return Err(failure())}xodus::secrets::set_secret_replacing(&entry,&v).map_err(|_|failure())?;Ok(None)},
     "remove" if request.value.is_none()=>{match entry.delete_credential(){Ok(())|Err(keyring_core::Error::NoEntry)=>Ok(None),Err(_)=>Err(failure())}},
     _=>Err(failure())
    }

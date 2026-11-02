@@ -322,6 +322,8 @@ fn create_session<T: SessionHandler>(
             .with_title(&request.title)
             .with_inner_size(Size::Logical(LogicalSize::new(500.0, 700.0)))
             .build(target)?;
+        #[cfg(target_os = "macos")]
+        install_edit_menu();
         state.window = Some(window);
     }
 
@@ -397,5 +399,55 @@ fn remove_session<T: SessionHandler>(state: &mut RuntimeState<T>, session_id: Se
     if state.active_session == Some(session_id) {
         state.active_session = None;
         state.active_webview = None;
+    }
+}
+
+/// The helper is its own macOS process with no menu bar of its own, so WKWebView never
+/// receives Cmd+V/C/X/A/Z: AppKit routes those key equivalents through the main menu's
+/// Edit items. Without this menu players cannot paste a password into the Microsoft
+/// login window. Items target the first responder (the focused web field).
+#[cfg(target_os = "macos")]
+fn install_edit_menu() {
+    use objc2::{MainThreadMarker, MainThreadOnly, sel};
+    use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
+    use objc2_foundation::NSString;
+
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    #[allow(unused_unsafe)]
+    unsafe {
+        let app = NSApplication::sharedApplication(mtm);
+        let main_menu = NSMenu::new(mtm);
+
+        // AppKit treats the first top-level item as the application menu.
+        let app_item = NSMenuItem::new(mtm);
+        let app_menu = NSMenu::new(mtm);
+        app_item.setSubmenu(Some(&app_menu));
+        main_menu.addItem(&app_item);
+
+        let edit_item = NSMenuItem::new(mtm);
+        let edit_menu = NSMenu::initWithTitle(NSMenu::alloc(mtm), &NSString::from_str("Edit"));
+        let entries = [
+            ("Undo", sel!(undo:), "z", false),
+            ("Redo", sel!(redo:), "z", true),
+            ("Cut", sel!(cut:), "x", false),
+            ("Copy", sel!(copy:), "c", false),
+            ("Paste", sel!(paste:), "v", false),
+            ("Select All", sel!(selectAll:), "a", false),
+        ];
+        for (title, action, key, shift) in entries {
+            let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &NSString::from_str(title),
+                Some(action),
+                &NSString::from_str(key),
+            );
+            if shift {
+                item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+            }
+            edit_menu.addItem(&item);
+        }
+        edit_item.setSubmenu(Some(&edit_menu));
+        main_menu.addItem(&edit_item);
+        app.setMainMenu(Some(&main_menu));
     }
 }

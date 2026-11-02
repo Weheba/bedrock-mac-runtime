@@ -14,6 +14,10 @@ const COMPONENTS:[(&str,&str);3]=[
  ("xgameruntime.gdk.dll","815d0c5b0aa5c84eb6104168da551a4922f49f8dd02dbdf3bbc5119beec11b59"),
  ("libHttpClient.GDK.dll","ca94296a372096153806422f5236144c695dfa9cd77607ef1761afc0e5a184b1")];
 fn err() -> Box<dyn std::error::Error> {std::io::Error::other("Acquisition validation failed").into()}
+/// Last install step entered. Reported as a fixed errorDetail code when the install fails.
+static STAGE: std::sync::Mutex<&'static str> = std::sync::Mutex::new("INSTALL_VALIDATE");
+fn enter_stage(code: &'static str) { if let Ok(mut s) = STAGE.lock() { *s = code; } }
+pub fn current_stage() -> &'static str { STAGE.lock().map(|s| *s).unwrap_or("INSTALL_UNKNOWN") }
 fn hex(bytes:impl AsRef<[u8]>) -> String {bytes.as_ref().iter().map(|b|format!("{b:02x}")).collect()}
 fn progress(phase:&str,completed:u64,total:u64) {
  println!("{}",serde_json::json!({"schema":1,"type":"progress","phase":phase,"completed":completed,"total":total}));
@@ -152,16 +156,17 @@ pub async fn install(stage:&Path,game_definition:crate::game::Game,experimental:
  game_definition.validate_install(requested,experimental)?;
  let versions=stage.parent().ok_or_else(err)?;
  if versions.file_name().and_then(|s|s.to_str())!=Some("Versions")||versions.parent().and_then(|p|p.file_name()).and_then(|s|s.to_str())!=Some(game_definition.id()) {return Err(err())}
- xodus::secrets::init_secrets()?;let tokens=TokenManager::with_keychain_and_memory();
+ enter_stage("INSTALL_KEYCHAIN");xodus::secrets::init_secrets()?;let tokens=TokenManager::with_keychain_and_memory();
  let client=reqwest::Client::builder().https_only(true).connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(90)).user_agent("MinecraftMacLauncher/0.2").build()?;
  if tokens.get_user().is_err(){return Err(err())}
  progress("authorizing",0,0);
- xodus::tokens::device::ensure_device_credentials(&client,&tokens).await;
+ enter_stage("INSTALL_DEVICE_AUTH");xodus::tokens::device::ensure_device_credentials(&client,&tokens).await;
+ enter_stage("INSTALL_STORE_LOOKUP");
  let id=if experimental {
   crate::package::get_content_id(&client,game_definition.store_id().into(),Some("neutral".into())).await?
  }else{game_definition.content_id().to_owned()};
- crate::license::get_license(&client,&tokens,id.clone(),"neutral".into()).await?;
- let package=crate::package::get_package_version(&client,&tokens,id.clone(),if experimental {None}else{Some(game_definition.tested_package_version())}).await
+ enter_stage("INSTALL_LICENSE");crate::license::get_license(&client,&tokens,id.clone(),"neutral".into()).await?;
+ enter_stage("INSTALL_PACKAGE_LOOKUP");let package=crate::package::get_package_version(&client,&tokens,id.clone(),if experimental {None}else{Some(game_definition.tested_package_version())}).await
     .map_err(|e|if experimental {e}else{std::io::Error::other("TESTED_PACKAGE_UNAVAILABLE").into()})?;
  let (version, revision)=crate::package::normalize_version(&package.version)?;
  game_definition.validate_install(&version,experimental)?;
@@ -183,13 +188,13 @@ pub async fn install(stage:&Path,game_definition:crate::game::Game,experimental:
  // Developer-only first pin acquisition over authenticated Microsoft HTTPS. Never enabled in distributable builds.
  if expected_hash.is_none() && !experimental && (!cfg!(feature="bootstrap-pins") || game_definition != crate::game::Game::Dungeons) {return Err(err())}
  let file_id=uuid::Uuid::parse_str(&file.content_id)?;
- let (device_key,license)=crate::license::get_license(&client,&tokens,file.content_id.clone(),"neutral".into()).await?;
+ enter_stage("INSTALL_CONTENT_LICENSE");let (device_key,license)=crate::license::get_license(&client,&tokens,file.content_id.clone(),"neutral".into()).await?;
  if license.content_keys.len()!=1{return Err(err())}
  let content_key=license.content_keys.values().next().ok_or_else(err)?.unpack(&device_key)?;
  let key=*content_key;
  let game=stage.join("Game");let components=stage.join("Components");new_dir(&game)?;new_dir(&components)?;
  let encrypted=stage.join("download.msixvc");
- progress("downloading-game",0,file.file_size as u64);
+ progress("downloading-game",0,file.file_size as u64);enter_stage("INSTALL_DOWNLOAD");
  let verify_retail_signature=experimental && expected_hash.is_none();
  let game_client=reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).connect_timeout(std::time::Duration::from_secs(30)).read_timeout(std::time::Duration::from_secs(90)).user_agent("MinecraftMacLauncher/0.2").build()?;
  let mut package_hash=None;
@@ -215,13 +220,13 @@ pub async fn install(stage:&Path,game_definition:crate::game::Game,experimental:
   if hex(h.finalize())!="5daa5f84d81bd12d295fdbe66306dd22465874dec45aa68890a180feb80c4948"{return Err(err())}
  }
  if verify_retail_signature {
-  progress("verifying-package",0,file.file_size as u64);
+  enter_stage("INSTALL_SIGNATURE");progress("verifying-package",0,file.file_size as u64);
   let mut clock=std::time::Instant::now();
   crate::signed_package::verify_file(&encrypted,file_id,&version,file.file_size as u64,|n,total|{
    if clock.elapsed().as_millis()>250 {progress("verifying-package",n,total);clock=std::time::Instant::now();}
   })?;
  }
- let mut source=tokio::io::BufReader::with_capacity(2*1024*1024,tokio::fs::File::open(&encrypted).await?);
+ enter_stage("INSTALL_PACKAGE_PARSE");let mut source=tokio::io::BufReader::with_capacity(2*1024*1024,tokio::fs::File::open(&encrypted).await?);
  let xvd=msixvc::xvd::XvdFile::parse(&mut source).await?;
  if xvd.content_id()!=file_id{return Err(err())}
  if expected_hash.is_none() && !verify_retail_signature {
@@ -230,7 +235,7 @@ pub async fn install(stage:&Path,game_definition:crate::game::Game,experimental:
  }
  let mut integrity=create(&stage.join("package-integrity.json"))?;
  integrity.write_all(&serde_json::to_vec(&serde_json::json!({"schema":1,"packagePin":pin_id,"packageHash":package_hash,"size":file.file_size}))?)?;integrity.sync_all()?;
- progress("decrypting",0,0);
+ progress("decrypting",0,0);enter_stage("INSTALL_FILE_LIST");
  let mut files=HashMap::new();for (name,metadata) in xvd.parse_user_package_files(&mut source).await?{
   if name=="SegmentMetadata.bin"{files.extend(xvd.parse_segment_metadata(&mut source,&metadata).await?);}
  }
@@ -239,7 +244,7 @@ pub async fn install(stage:&Path,game_definition:crate::game::Game,experimental:
  let mut total=0u64;let mut unique=HashSet::new();let mut paths=vec![];
  for (name,file) in files {let path=safe_relative(&name)?;if !unique.insert(path.to_string_lossy().to_lowercase()){return Err(err())}total=total.checked_add(file.length).ok_or_else(err)?;paths.push((path,file));}
  if total>64*1024*1024*1024{return Err(err())}
- let mut completed=0;let mut clock=std::time::Instant::now();
+ enter_stage("INSTALL_EXTRACT");let mut completed=0;let mut clock=std::time::Instant::now();
  paths.sort_by(|a,b|a.0.cmp(&b.0));
  for (path,file) in paths {
   let target=game.join(path);std::fs::create_dir_all(target.parent().ok_or_else(err)?)?;
@@ -248,7 +253,7 @@ pub async fn install(stage:&Path,game_definition:crate::game::Game,experimental:
   output.flush().await?;output.get_ref().sync_all().await?;
   if output.get_ref().metadata().await?.len()!=file.length{return Err(err())}completed+=file.length;
  }
- progress("downloading-components",0,0);
+ progress("downloading-components",0,0);enter_stage("INSTALL_COMPONENTS");
  let nuget=stage.join("gdk2604.zip");
  download(&client,NUGET_URL,&nuget,Some(141330356),200*1024*1024,Some("ba9cb693a7898d921116d0a7a9bd1c37d12c55a2c25ac88b08ae17a49e135c3e"),"downloading-components").await?;extract_nuget(&nuget,&components)?;
  let sdk=stage.join("gdk2504.zip");

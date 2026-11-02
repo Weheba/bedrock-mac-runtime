@@ -308,6 +308,12 @@ impl XvdFile {
         self.header.vduid
     }
 
+    fn in_encrypted_section(&self, offset: u64) -> bool {
+        self.encrypted_section_infos.iter().any(|s| {
+            offset >= s.section_offset && offset < s.section_offset.saturating_add(s.section_length)
+        })
+    }
+
     fn non_encrypted_prefix_len(&self, start: u64, len: u64) -> u64 {
         let end = start.saturating_add(len);
         let mut prefix_len = len;
@@ -745,8 +751,12 @@ impl XvdFile {
                         offset: partition_offset + start,
                         length: report.value_length,
                         data_hashs: vec![],
+                        // Executables inside an encrypted region stay protected. Newer
+                        // packages (Bedrock 1.26.6005) store the exe in a plaintext region;
+                        // marking it protected made extraction fail with "no decryption section".
                         keep_encrypted: !only_plain
-                            && report.path.to_ascii_lowercase().ends_with(".exe"),
+                            && report.path.to_ascii_lowercase().ends_with(".exe")
+                            && self.in_encrypted_section(partition_offset + start),
                     },
                 );
             }
@@ -1101,6 +1111,23 @@ mod persistent_tests {
         xvd.mount_mem_fd(&mut input,&mut output,&file,[42;32],|_,_|{}).await.unwrap();output.sync_all().await.unwrap();drop(output);
         assert_eq!(std::fs::read(&target).unwrap(),expected);assert_eq!(std::fs::read(&source).unwrap(),encrypted);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn only_offsets_inside_an_encrypted_region_are_protected() {
+        let (xvd,_,_,_)=fixture();
+        assert!(xvd.in_encrypted_section(0));
+        assert!(xvd.in_encrypted_section(4095));
+        assert!(!xvd.in_encrypted_section(4096));
+        assert!(!xvd.in_encrypted_section(77307904));
+    }
+    #[tokio::test]
+    async fn plaintext_file_outside_sections_extracts_unchanged() {
+        let (xvd,_,_,_)=fixture();
+        let plain:Vec<u8>=(0..4096).map(|n|(n%13) as u8).collect();
+        let file=SegmentFile{offset:4096,length:4000,data_hashs:vec![],keep_encrypted:false};
+        let mut out=Vec::new();
+        xvd.mount_mem_fd(&mut &plain[..],&mut out,&file,[42;32],|_,_|{}).await.unwrap();
+        assert_eq!(out,plain[..4000].to_vec());
     }
     #[tokio::test]
     async fn corrupt_truncated_or_sectionless_protected_files_are_rejected() {

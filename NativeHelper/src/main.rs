@@ -5,6 +5,7 @@ use serde::Serialize;
 use std::panic::AssertUnwindSafe;
 use xodus::tokens::TokenManager;
 use xodus::models::secrets::Token;
+use xodus::api::xbox::XboxAuthError;
 mod acquire;
 mod signed_package;
 mod bridge;
@@ -25,15 +26,24 @@ struct Reply {
     available_version: Option<String>,
     available_revision: Option<String>,
     error_code: Option<&'static str>,
+    /// Fixed, non-secret reason for a failure (never response contents).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_detail: Option<&'static str>,
 }
 impl Reply {
-    fn signed_out() -> Self { Self { schema:1, status:"ok", signed_in:false, gamertag:None, entitlement:"unknown", available_version:None, available_revision:None, error_code:None } }
+    fn signed_out() -> Self { Self { schema:1, status:"ok", signed_in:false, gamertag:None, entitlement:"unknown", available_version:None, available_revision:None, error_code:None, error_detail:None } }
     fn failure(code: &'static str) -> Self { let mut r = Self::signed_out(); r.status="error"; r.error_code=Some(code); r }
+    fn failure_detail(code: &'static str, detail: &'static str) -> Self { let mut r = Self::failure(code); r.error_detail=Some(detail); r }
 }
 #[tokio::main]
 async fn main() {
     // Upstream panics may include response contents. Never emit their payload.
     std::panic::set_hook(Box::new(|_| {}));
+    // Never let the keychain ask for the login password. Items written by an earlier,
+    // differently signed build fail fast instead and are replaced (see KeychainBackend),
+    // which costs one sign-in after an update rather than a prompt per item and read.
+    #[cfg(target_os = "macos")]
+    let _keychain_ui = security_framework::os::macos::keychain::SecKeychain::disable_user_interaction().ok();
     let command = std::env::args().nth(1).unwrap_or_default();
     if command == "install" {
         let stage=std::env::args().nth(2).unwrap_or_default();
@@ -57,7 +67,7 @@ async fn main() {
                 "TESTED_PACKAGE_UNAVAILABLE"=>"TESTED_PACKAGE_UNAVAILABLE",
                 _=>"INSTALL_FAILED"
             },_=>"INSTALL_FAILED" };
-            println!("{}",serde_json::json!({"schema":1,"type":"error","code":code}));std::process::exit(1);
+            println!("{}",serde_json::json!({"schema":1,"type":"error","code":code,"detail":acquire::current_stage()}));std::process::exit(1);
         } return;
     }
     #[cfg(feature="bootstrap-pins")]
@@ -100,20 +110,24 @@ async fn main() {
         if args.len()!=4 || acquire::extract_sdk(std::path::Path::new(&args[2]),std::path::Path::new(&args[3])).is_err(){std::process::exit(1)}; return;
     }
     if command == "bridge" { let _ = bridge::run(); return; }
-    let reply = AssertUnwindSafe(run(&command, &std::env::args().nth(2).unwrap_or_else(||"dungeons2".into()))).catch_unwind().await.unwrap_or_else(|_| Reply::failure("MICROSOFT_SERVICE_FAILED"));
+    let reply = AssertUnwindSafe(run(&command, &std::env::args().nth(2).unwrap_or_else(||"dungeons2".into()))).catch_unwind().await.unwrap_or_else(|_| Reply::failure_detail("MICROSOFT_SERVICE_FAILED", "HELPER_PANIC"));
     println!("{}", serde_json::to_string(&reply).unwrap());
 }
 async fn run(command: &str, game_id: &str) -> Reply {
     let game = match game::Game::parse(game_id) { Ok(g)=>g,Err(_)=>return Reply::failure("COMMAND_INVALID") };
     if !matches!(command, "status" | "login" | "logout" | "check") { return Reply::failure("COMMAND_INVALID"); }
     if xodus::secrets::init_secrets().is_err() { return Reply::failure("KEYCHAIN_UNAVAILABLE"); }
+    if xodus::secrets::keychain_locked() { return Reply::failure_detail("KEYCHAIN_UNAVAILABLE", "KEYCHAIN_LOCKED"); }
     let tokens = TokenManager::with_keychain_and_memory();
     if command == "logout" {
         // Only this helper's private namespace. Never the reference game account.
+        // Delete without reading first: reading an item from an older build is what prompts.
         for key in ["dev_license", "device-tokens", "user-tokens", "user-DA"] {
-            if let Ok(entry) = xodus::secrets::get_entry(key) {
-                if entry.get_secret().is_ok() && entry.delete_credential().is_err() { return Reply::failure("SIGN_OUT_FAILED"); }
-            } else { return Reply::failure("SIGN_OUT_FAILED"); }
+            let Ok(entry) = xodus::secrets::get_entry(key) else { return Reply::failure("SIGN_OUT_FAILED"); };
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring_core::Error::NoEntry) => {}
+                Err(_) => return Reply::failure("SIGN_OUT_FAILED"),
+            }
         }
         return Reply::signed_out();
     }
@@ -131,23 +145,42 @@ async fn run(command: &str, game_id: &str) -> Reply {
     }
     let Ok(Token::Legacy(user)) = tokens.get_user_sts_token() else { return Reply::failure("SIGN_IN_REQUIRED"); };
     let Ok(Token::Legacy(device)) = tokens.get_device_sts_token() else { return Reply::failure("DEVICE_AUTH_REQUIRED"); };
-    let xbox = xodus::api::xbox::run(&client, device, user, "http://xboxlive.com").await;
+    let xbox = match xodus::api::xbox::try_run(&client, device, user.clone(), "http://xboxlive.com").await {
+        Ok(xbox) => xbox,
+        // A fault here is almost always a stale device STS token. Microsoft can revoke it
+        // before its local expiry, so re-authenticate the device once and retry.
+        Err(XboxAuthError::UserTokenFault) => {
+            xodus::tokens::device::refresh_device_credentials(&client, &tokens).await;
+            let Ok(Token::Legacy(device)) = tokens.get_device_sts_token() else { return Reply::failure("DEVICE_AUTH_REQUIRED"); };
+            match xodus::api::xbox::try_run(&client, device, user, "http://xboxlive.com").await {
+                Ok(xbox) => xbox,
+                Err(XboxAuthError::UserTokenFault) if command == "check" => {
+                    // The stored user sign-in is no longer accepted. Forget it so the next
+                    // Play or Sign In opens the Microsoft window instead of failing again.
+                    let _ = tokens.remove_persistent();
+                    return Reply::failure_detail("SIGN_IN_REQUIRED", XboxAuthError::UserTokenFault.code());
+                }
+                Err(e) => return Reply::failure_detail("MICROSOFT_SERVICE_FAILED", e.code()),
+            }
+        }
+        Err(e) => return Reply::failure_detail("MICROSOFT_SERVICE_FAILED", e.code()),
+    };
     let gamertag = xbox.gamertag().filter(|s| s.len() <= 256 && !s.chars().any(char::is_control)).map(str::to_string);
     if command == "login" {
-        return Reply { schema:1, status:"ok", signed_in:true, gamertag, entitlement:"unknown", available_version:None, available_revision:None, error_code:None };
+        return Reply { schema:1, status:"ok", signed_in:true, gamertag, entitlement:"unknown", available_version:None, available_revision:None, error_code:None, error_detail:None };
     }
     let content_id = match package::get_content_id(&client, game.store_id().to_string(), Some("neutral".into())).await {
         Ok(id) => id, Err(_) => return Reply::failure("STORE_LOOKUP_FAILED")
     };
     // Real content license authorization comes BEFORE package lookup. No game/CDN downloads here.
     if license::get_license(&client, &tokens, content_id.clone(), "neutral".into()).await.is_err() {
-        return Reply { schema:1, status:"error", signed_in:true, gamertag, entitlement:"unknown", available_version:None, available_revision:None, error_code:Some("ENTITLEMENT_NOT_CONFIRMED") };
+        return Reply { schema:1, status:"error", signed_in:true, gamertag, entitlement:"unknown", available_version:None, available_revision:None, error_code:Some("ENTITLEMENT_NOT_CONFIRMED"), error_detail:None };
     }
     let package = match package::get_packages(&client, &tokens, content_id.clone()).await {
         Ok(p) => p, Err(_) => return Reply::failure("PACKAGE_LOOKUP_FAILED")
     };
     let (version, revision) = match package::normalize_version(&package.version) { Ok(v) => v, Err(_) => return Reply::failure("PACKAGE_VERSION_INVALID") };
-    Reply { schema:1, status:"ok", signed_in:true, gamertag, entitlement:"verified", available_version:Some(version), available_revision:revision, error_code:None }
+    Reply { schema:1, status:"ok", signed_in:true, gamertag, entitlement:"verified", available_version:Some(version), available_revision:revision, error_code:None, error_detail:None }
 }
 
 #[cfg(test)]
@@ -164,5 +197,11 @@ mod tests {
         let json = serde_json::to_value(Reply::signed_out()).unwrap();
         let keys: std::collections::BTreeSet<_> = json.as_object().unwrap().keys().map(String::as_str).collect();
         assert_eq!(keys, ["schema", "status", "signedIn", "gamertag", "entitlement", "availableVersion", "availableRevision", "errorCode"].into_iter().collect());
+    }
+    #[test]
+    fn failure_detail_is_a_fixed_code() {
+        let json = serde_json::to_value(Reply::failure_detail("MICROSOFT_SERVICE_FAILED", XboxAuthError::UserTokenFault.code())).unwrap();
+        assert_eq!(json["errorDetail"], "MSA_USER_TOKEN_FAULT");
+        assert_eq!(json["errorCode"], "MICROSOFT_SERVICE_FAILED");
     }
 }

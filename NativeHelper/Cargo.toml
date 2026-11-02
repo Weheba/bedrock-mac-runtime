@@ -27,6 +27,14 @@ rsa = { version = "0.9.10", features = ["sha2"] }
 
 bedrock-account-service = { package = "minecraft-bedrock-account-service", path = "../Compatibility/Bedrock/AccountService" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already in the tree via wry/tao; used for the login window's Edit menu (Cmd+V paste).
+objc2 = "0.6.4"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSMenu", "NSMenuItem", "NSEvent"] }
+# Already in the tree via apple-native-keyring-store; used to disable keychain prompts.
+security-framework = "3.7.0"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+
 [features]
 bootstrap-pins = []
 
