@@ -6,12 +6,18 @@ use crate::models::secrets::{Device, Token};
 use chrono::{DateTime, Utc};
 use crate::models::soap::BodyContent;
 use crate::tokens::manager::TokenManager;
+use crate::tokens::store::TokenStoreError;
 
 /// Provisions a device (if none is stored yet) or re-authenticates an existing one
 /// (if its STS token is missing/expired), persisting the result through `tokens`.
 pub async fn ensure_device_credentials(client: &reqwest::Client, tokens: &TokenManager) {
     match tokens.get_device_license() {
-        Err(_) => provision_device(client, tokens).await,
+        // Provision only when no usable license is stored. A keychain failure
+        // (locked, I/O) must not register a phantom device.
+        Err(TokenStoreError::NotFound | TokenStoreError::Serde(_)) => {
+            provision_device(client, tokens).await
+        }
+        Err(_) => {}
         Ok(license)
             if tokens
                 .get_device_sts_token()
@@ -28,7 +34,12 @@ pub async fn ensure_device_credentials(client: &reqwest::Client, tokens: &TokenM
 /// ("The provided proof key is invalid"). Provisions a device if none exists.
 pub async fn refresh_device_credentials(client: &reqwest::Client, tokens: &TokenManager) {
     match tokens.get_device_license() {
-        Err(_) => provision_device(client, tokens).await,
+        // Provision only when no usable license is stored. A keychain failure
+        // (locked, I/O) must not register a phantom device.
+        Err(TokenStoreError::NotFound | TokenStoreError::Serde(_)) => {
+            provision_device(client, tokens).await
+        }
+        Err(_) => {}
         Ok(license) => reauthenticate_device(client, tokens, license).await,
     }
 }

@@ -117,6 +117,7 @@ async fn run(command: &str, game_id: &str) -> Reply {
     let game = match game::Game::parse(game_id) { Ok(g)=>g,Err(_)=>return Reply::failure("COMMAND_INVALID") };
     if !matches!(command, "status" | "login" | "logout" | "check") { return Reply::failure("COMMAND_INVALID"); }
     if xodus::secrets::init_secrets().is_err() { return Reply::failure("KEYCHAIN_UNAVAILABLE"); }
+    if xodus::secrets::keychain_locked() { return Reply::failure_detail("KEYCHAIN_UNAVAILABLE", "KEYCHAIN_LOCKED"); }
     let tokens = TokenManager::with_keychain_and_memory();
     if command == "logout" {
         // Only this helper's private namespace. Never the reference game account.
