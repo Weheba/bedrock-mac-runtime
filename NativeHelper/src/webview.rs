@@ -408,7 +408,7 @@ fn remove_session<T: SessionHandler>(state: &mut RuntimeState<T>, session_id: Se
 /// login window. Items target the first responder (the focused web field).
 #[cfg(target_os = "macos")]
 fn install_edit_menu() {
-    use objc2::{MainThreadMarker, sel};
+    use objc2::{MainThreadMarker, MainThreadOnly, sel};
     use objc2_app_kit::{NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem};
     use objc2_foundation::NSString;
 

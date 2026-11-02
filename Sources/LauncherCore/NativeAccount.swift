@@ -24,7 +24,7 @@ public struct AccountStatus: Codable, Sendable {
         guard result.schema == 1, ["ok", "error"].contains(result.status), ["unknown", "verified"].contains(result.entitlement),
               result.availableRevision.map({ UUID(uuidString: $0) != nil }) ?? true,
               result.errorCode.map({ allowedCodes.contains($0) }) ?? true,
-              result.errorDetail.map({ $0.utf8.count <= 64 && $0.allSatisfy({ $0.isASCII && ($0.isUppercase || $0.isNumber || $0 == "_") }) }) ?? true,
+              result.errorDetail.map({ !$0.isEmpty && $0.utf8.count <= 64 && $0.allSatisfy({ $0.isASCII && ($0.isUppercase || $0.isNumber || $0 == "_") }) }) ?? true,
               result.gamertag.map({ $0.utf8.count <= 256 && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }) ?? true,
               result.availableVersion.map({ (try? PackageVersion($0)) != nil }) ?? true,
               result.entitlement != "verified" || (result.status == "ok" && result.signedIn && result.availableVersion != nil) else {
