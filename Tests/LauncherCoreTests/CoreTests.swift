@@ -233,6 +233,12 @@ final class CoreTests: XCTestCase {
             XCTAssertThrowsError(try AccountStatus.decode(Data(bad.utf8)))
         }
     }
+    func testAccountSchemaAcceptsFixedErrorDetailOnly() throws {
+        let detailed = Data(#"{"schema":1,"status":"error","signedIn":false,"entitlement":"unknown","errorCode":"MICROSOFT_SERVICE_FAILED","errorDetail":"MSA_USER_TOKEN_FAULT"}"#.utf8)
+        XCTAssertEqual(try AccountStatus.decode(detailed).errorDetail, "MSA_USER_TOKEN_FAULT")
+        let leaky = Data(#"{"schema":1,"status":"error","signedIn":false,"entitlement":"unknown","errorCode":"MICROSOFT_SERVICE_FAILED","errorDetail":"eyJ token value"}"#.utf8)
+        XCTAssertThrowsError(try AccountStatus.decode(leaky))
+    }
     func testLiveReferenceWhenExplicitlyEnabled() async throws {
         guard ProcessInfo.processInfo.environment["MINECRAFT_LIVE_REFERENCE_TEST"] == "1" else { throw XCTSkip("Live CrossOver verification is opt-in.") }
         let game = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Games/MinecraftDungeons2-FullyDecrypted")

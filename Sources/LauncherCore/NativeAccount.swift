@@ -9,9 +9,10 @@ public struct AccountStatus: Codable, Sendable {
     public let availableVersion: String?
     public let availableRevision: String?
     public let errorCode: String?
+    public let errorDetail: String?
     public static func decode(_ data: Data) throws -> Self {
         guard data.count <= 16384 else { throw LauncherError("HELPER_PROTOCOL_FAILED", "Account helper exceeded its response limit.") }
-        let allowedFields: Set<String> = ["schema", "status", "signedIn", "gamertag", "entitlement", "availableVersion", "availableRevision", "errorCode"]
+        let allowedFields: Set<String> = ["schema", "status", "signedIn", "gamertag", "entitlement", "availableVersion", "availableRevision", "errorCode", "errorDetail"]
         guard let object = try? JSONSerialization.jsonObject(with: data) as? [String:Any], Set(object.keys).isSubset(of: allowedFields) else {
             throw LauncherError("HELPER_PROTOCOL_FAILED", "Account helper returned unexpected fields.")
         }
@@ -23,6 +24,7 @@ public struct AccountStatus: Codable, Sendable {
         guard result.schema == 1, ["ok", "error"].contains(result.status), ["unknown", "verified"].contains(result.entitlement),
               result.availableRevision.map({ UUID(uuidString: $0) != nil }) ?? true,
               result.errorCode.map({ allowedCodes.contains($0) }) ?? true,
+              result.errorDetail.map({ $0.utf8.count <= 64 && $0.allSatisfy({ $0.isASCII && ($0.isUppercase || $0.isNumber || $0 == "_") }) }) ?? true,
               result.gamertag.map({ $0.utf8.count <= 256 && !$0.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) }) ?? true,
               result.availableVersion.map({ (try? PackageVersion($0)) != nil }) ?? true,
               result.entitlement != "verified" || (result.status == "ok" && result.signedIn && result.availableVersion != nil) else {
@@ -88,7 +90,8 @@ public actor NativeAccount {
             case "KEYCHAIN_UNAVAILABLE": message = "The macOS Keychain is unavailable."
             default: message = "The Microsoft service could not complete this operation."
             }
-            throw LauncherError(code, message, recovery: "Sign in with the account that owns the game and retry. Ownership remains unverified on any failure.")
+            let detail = status.errorDetail.map { " (\($0))" } ?? ""
+            throw LauncherError(code, message + detail, recovery: "Sign in with the account that owns the game and retry. Ownership remains unverified on any failure.")
         }
         return status
     }

@@ -107,7 +107,13 @@ final class AppModel: ObservableObject {
             if current.isOfficialManaged {
                 let status = try await self.nativeAccount.request(.status, game: game)
                 if !status.signedIn { self.accounts[game] = try await self.nativeAccount.request(.login, game: game) }
-                self.accounts[game] = try await self.nativeAccount.request(.check, game: game)
+                do {
+                    self.accounts[game] = try await self.nativeAccount.request(.check, game: game)
+                } catch let error as LauncherError where error.code == "SIGN_IN_REQUIRED" && status.signedIn {
+                    // The helper discarded a sign-in Microsoft no longer accepts. Sign in again once.
+                    self.accounts[game] = try await self.nativeAccount.request(.login, game: game)
+                    self.accounts[game] = try await self.nativeAccount.request(.check, game: game)
+                }
             }
             if current.isOfficialManaged {
                 let profile = try CompatibilityProfile.forInstallation(current)

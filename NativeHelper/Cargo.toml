@@ -27,6 +27,12 @@ rsa = { version = "0.9.10", features = ["sha2"] }
 
 bedrock-account-service = { package = "minecraft-bedrock-account-service", path = "../Compatibility/Bedrock/AccountService" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Already in the tree via wry/tao; used for the login window's Edit menu (Cmd+V paste).
+objc2 = "0.6.4"
+objc2-app-kit = "0.3.2"
+objc2-foundation = "0.3.2"
+
 [features]
 bootstrap-pins = []
 
