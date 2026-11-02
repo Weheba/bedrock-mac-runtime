@@ -15,7 +15,7 @@ pre-existing game folder or copied CrossOver bottle is needed.
 
 ## First launch
 
-1. Download the arm64 DMG from [GitHub Releases](https://github.com/rafaelreverberi/Minecraft-on-Mac/releases/tag/v0.4.0).
+1. Download the arm64 DMG from [GitHub Releases](https://github.com/Weheba/bedrock-mac-runtime/releases/tag/v0.4.1).
 2. Open the DMG and drag Minecraft on Mac.app to Applications. Eject the disk image.
    Alternatively, extract the app ZIP and move the app to Applications.
 3. Open the app. This preview is ad-hoc signed, not Developer ID signed or notarized.

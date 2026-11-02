@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix='minecraft-release-', dir=root/'build') 
         'This preview is ad-hoc signed and unnotarized. If macOS blocks first launch,\n'
         'use System Settings > Privacy & Security > Open Anyway for this app.\n'
         'Microsoft sign-in and Keychain access are requested by the launcher.\n\n'
-        'Guide: https://github.com/rafaelreverberi/Minecraft-on-Mac/blob/v'+version+'/docs/INSTALL.md\n'
+        'Guide: https://github.com/Weheba/bedrock-mac-runtime/blob/v'+version+'/docs/INSTALL.md\n'
     )
     subprocess.run(['hdiutil', 'create', '-volname', 'Minecraft on Mac '+version,
                     '-srcfolder', str(stage), '-format', 'UDZO', str(disk)], check=True)

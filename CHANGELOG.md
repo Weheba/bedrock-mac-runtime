@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1 — 2026-11-02
+
+- Fix Microsoft sign-in, ownership checks and Play failing with MICROSOFT_SERVICE_FAILED after Microsoft's late-October change to the Xbox token exchange.
+- Refresh the stored device token before it expires instead of reusing it indefinitely.
+- Install newer Bedrock versions such as 1.26.6005, whose game executable is stored unencrypted.
+- No repeated keychain password prompts after updating the app; the launcher asks for one Microsoft sign-in instead.
+- Paste and other edit shortcuts work in the Microsoft sign-in window.
+- Account and install errors now end with a short step code for reports.
+
 ## 0.4.0 — 2026-10-18
 
 - Promote user-tested Dungeons II 1.1.2.0 to the latest tested, pinned release while retaining the 1.1.1.0 profile.
