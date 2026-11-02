@@ -6,6 +6,7 @@ public enum ManagedInstaller {
         let schema: Int
         let type: String
         let phase: String?
+        let detail: String?
         let completed: Int64?
         let total: Int64?
         let version: String?
@@ -24,7 +25,7 @@ public enum ManagedInstaller {
             let timeout = DispatchWorkItem { if p.isRunning { p.terminate() } }
             DispatchQueue.global().asyncAfter(deadline: .now() + 14400, execute: timeout)
             defer { timeout.cancel() }
-            var pending = Data(); var finished = false; var invalid = false; var lastPhase = ""; var failureCode = "INSTALL_FAILED"
+            var pending = Data(); var finished = false; var invalid = false; var lastPhase = ""; var failureCode = "INSTALL_FAILED"; var failureDetail: String? = nil
             let phases = ["authorizing":"Verifying Microsoft license", "downloading-game":"Downloading game", "verifying-package":"Verifying encrypted package", "decrypting":"Preparing game files", "downloading-components":"Downloading Microsoft components"]
             while let chunk = try pipe.fileHandleForReading.read(upToCount: 4096), !chunk.isEmpty {
                 pending.append(chunk)
@@ -35,7 +36,7 @@ public enum ManagedInstaller {
                         if lastPhase != phase { try FileSafety.write(["phase":phase], to: stage.appendingPathComponent("operation-status.json")); lastPhase = phase }
                         progress(.init(label, completed: done, total: total))
                     } else if event.type == "complete", event.version == targetVersion, !finished { finished = true }
-                    else if event.type == "error", let code = event.code, ["INSTALL_FAILED", "BEDROCK_VERSION_TOO_OLD", "BEDROCK_COMPATIBILITY_UNVERIFIED", "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED", "PACKAGE_VERSION_CHANGED", "TESTED_PACKAGE_UNAVAILABLE", "SECURE_DOWNLOAD_UNAVAILABLE", "PACKAGE_DOWNLOAD_UNAVAILABLE", "PACKAGE_AUTHENTICITY_FAILED", "PACKAGE_FORMAT_UNSUPPORTED"].contains(code) { invalid = true; failureCode = code }
+                    else if event.type == "error", let code = event.code, ["INSTALL_FAILED", "BEDROCK_VERSION_TOO_OLD", "BEDROCK_COMPATIBILITY_UNVERIFIED", "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED", "PACKAGE_VERSION_CHANGED", "TESTED_PACKAGE_UNAVAILABLE", "SECURE_DOWNLOAD_UNAVAILABLE", "PACKAGE_DOWNLOAD_UNAVAILABLE", "PACKAGE_AUTHENTICITY_FAILED", "PACKAGE_FORMAT_UNSUPPORTED"].contains(code) { invalid = true; failureCode = code; failureDetail = event.detail.flatMap(ManagedInstaller.safeDetail) }
                     else { invalid = true }
                 }
                 if invalid || pending.count > 4096 { invalid = true; if p.isRunning { p.terminate() }; break }
@@ -48,9 +49,14 @@ public enum ManagedInstaller {
                 if failureCode == "SECURE_DOWNLOAD_UNAVAILABLE" { throw LauncherError(failureCode, "A verified HTTPS source for this untested package could not be reached.", recovery: "Retry later or use the latest tested version. The existing installation is unchanged.") }
                 if failureCode == "PACKAGE_VERSION_CHANGED" { throw LauncherError(failureCode, "Microsoft's available version changed. Check for updates again before downloading.") }
                 if failureCode == "TESTED_PACKAGE_UNAVAILABLE" { throw LauncherError(failureCode, "Microsoft could not provide the latest tested package.", recovery: "Retry later. An already installed tested version remains available; no other version was downloaded instead.") }
-                throw LauncherError(failureCode, failureCode == "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED" ? "Microsoft did not supply a trusted SHA-256 for this Bedrock package revision. A reviewed package pin is required." : "The licensed download or extraction did not complete.", recovery: failureCode == "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED" ? "Use a launcher release with a reviewed pin for this Bedrock revision. Retrying sign-in or the connection cannot supply a missing pin. Your current version is preserved; interrupted Bedrock files are listed on the Bedrock page." : "Check the connection, Microsoft account and available storage, then retry. Your current version is preserved; interrupted files are listed in Storage.")
+                throw LauncherError(failureCode, failureCode == "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED" ? "Microsoft did not supply a trusted SHA-256 for this Bedrock package revision. A reviewed package pin is required." : "The licensed download or extraction did not complete." + (failureDetail.map { " (\($0))" } ?? ""), recovery: failureCode == "BEDROCK_PACKAGE_INTEGRITY_UNVERIFIED" ? "Use a launcher release with a reviewed pin for this Bedrock revision. Retrying sign-in or the connection cannot supply a missing pin. Your current version is preserved; interrupted Bedrock files are listed on the Bedrock page." : "Check the connection, Microsoft account and available storage, then retry. Your current version is preserved; interrupted files are listed in Storage.")
             }
         }.value
+    }
+    /// Fixed install-step code from the helper: uppercase ASCII, digits and underscores only.
+    static func safeDetail(_ value: String) -> String? {
+        guard !value.isEmpty, value.utf8.count <= 64, value.allSatisfy({ $0.isASCII && ($0.isUppercase || $0.isNumber || $0 == "_") }) else { return nil }
+        return value
     }
     public static func run(_ executable: URL, arguments: [String], timeout: Double = 180, accepted: Set<Int32> = [0]) async throws {
         try await Task.detached {

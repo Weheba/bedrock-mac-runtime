@@ -67,7 +67,7 @@ async fn main() {
                 "TESTED_PACKAGE_UNAVAILABLE"=>"TESTED_PACKAGE_UNAVAILABLE",
                 _=>"INSTALL_FAILED"
             },_=>"INSTALL_FAILED" };
-            println!("{}",serde_json::json!({"schema":1,"type":"error","code":code}));std::process::exit(1);
+            println!("{}",serde_json::json!({"schema":1,"type":"error","code":code,"detail":acquire::current_stage()}));std::process::exit(1);
         } return;
     }
     #[cfg(feature="bootstrap-pins")]
