@@ -326,4 +326,9 @@ final class CoreTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: bottle.appendingPathComponent("drive_c/users/crossover/.xodus-keyring.ron").path))
     }
 
+
+    func testDeviceLimitReplyIsAccepted() throws {
+        let data = Data(#"{"schema":1,"status":"error","signedIn":true,"gamertag":null,"entitlement":"unknown","availableVersion":null,"availableRevision":null,"errorCode":"DEVICE_LIMIT_REACHED","errorDetail":null}"#.utf8)
+        XCTAssertEqual(try AccountStatus.decode(data).errorCode, "DEVICE_LIMIT_REACHED")
+    }
 }

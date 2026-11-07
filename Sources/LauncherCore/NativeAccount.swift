@@ -20,7 +20,7 @@ public struct AccountStatus: Codable, Sendable {
         do { result = try JSONDecoder().decode(Self.self, from: data) } catch {
             throw LauncherError("HELPER_PROTOCOL_FAILED", "Account helper returned an invalid response.")
         }
-        let allowedCodes = ["COMMAND_INVALID", "KEYCHAIN_UNAVAILABLE", "SIGN_OUT_FAILED", "NETWORK_UNAVAILABLE", "MICROSOFT_SERVICE_FAILED", "LOGIN_CANCELLED", "SIGN_IN_REQUIRED", "DEVICE_AUTH_REQUIRED", "STORE_LOOKUP_FAILED", "ENTITLEMENT_NOT_CONFIRMED", "PACKAGE_LOOKUP_FAILED", "PACKAGE_VERSION_INVALID"]
+        let allowedCodes = ["DEVICE_LIMIT_REACHED", "COMMAND_INVALID", "KEYCHAIN_UNAVAILABLE", "SIGN_OUT_FAILED", "NETWORK_UNAVAILABLE", "MICROSOFT_SERVICE_FAILED", "LOGIN_CANCELLED", "SIGN_IN_REQUIRED", "DEVICE_AUTH_REQUIRED", "STORE_LOOKUP_FAILED", "ENTITLEMENT_NOT_CONFIRMED", "PACKAGE_LOOKUP_FAILED", "PACKAGE_VERSION_INVALID"]
         guard result.schema == 1, ["ok", "error"].contains(result.status), ["unknown", "verified"].contains(result.entitlement),
               result.availableRevision.map({ UUID(uuidString: $0) != nil }) ?? true,
               result.errorCode.map({ allowedCodes.contains($0) }) ?? true,
@@ -83,6 +83,9 @@ public actor NativeAccount {
         let status = try AccountStatus.decode(data)
         if status.status == "error" {
             let code = status.errorCode ?? "MICROSOFT_SERVICE_FAILED"
+            if code == "DEVICE_LIMIT_REACHED" {
+                throw LauncherError(code, "Your Microsoft account has reached its device limit.", recovery: "Go to account.microsoft.com/devices/content, unlink a device you no longer use, then try again.")
+            }
             let message: String
             switch code {
             case "ENTITLEMENT_NOT_CONFIRMED": message = "Microsoft did not confirm a content license for \(game.name). No game data was downloaded."

@@ -574,6 +574,6 @@ struct AccountView: View {
         }
         .confirmationDialog("Sign out of the native package account?", isPresented: $signOut, titleVisibility: .visible) {
             Button("Sign Out", role: .destructive) { Task { await model.accountOperation(.logout, game: game) } }
-        } message: { Text("Removes only this launcher's Microsoft Keychain entries. The working game's current login stays intact. Sign in again to switch the native package account.") }
+        } message: { Text("Removes this launcher's Microsoft sign-in from Keychain. The working game's current login stays intact. Sign in again to switch the native package account.") }
     }
 }
