@@ -173,8 +173,8 @@ async fn run(command: &str, game_id: &str) -> Reply {
         Ok(id) => id, Err(_) => return Reply::failure("STORE_LOOKUP_FAILED")
     };
     // Real content license authorization comes BEFORE package lookup. No game/CDN downloads here.
-    if license::get_license(&client, &tokens, content_id.clone(), "neutral".into()).await.is_err() {
-        return Reply { schema:1, status:"error", signed_in:true, gamertag, entitlement:"unknown", available_version:None, available_revision:None, error_code:Some("ENTITLEMENT_NOT_CONFIRMED"), error_detail:None };
+    if let Err(error) = license::get_license(&client, &tokens, content_id.clone(), "neutral".into()).await {
+        return Reply { schema:1, status:"error", signed_in:true, gamertag, entitlement:"unknown", available_version:None, available_revision:None, error_code:Some("ENTITLEMENT_NOT_CONFIRMED"), error_detail:Some(license::failure_code(&error)) };
     }
     let package = match package::get_packages(&client, &tokens, content_id.clone()).await {
         Ok(p) => p, Err(_) => return Reply::failure("PACKAGE_LOOKUP_FAILED")

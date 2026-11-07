@@ -142,9 +142,20 @@ async fn run_chain(
     let Token::Compact(user_token) = user_token else {
         return Err(XboxAuthError::UnsupportedToken);
     };
-    let resp = authenticate_xbox_user(client, user_token)
-        .await
-        .map_err(|e| XboxAuthError::UserAuth(e.status().map(|s| s.as_u16())))?;
+    let resp = match authenticate_xbox_user(client, user_token.clone()).await {
+        Ok(resp) => resp,
+        // Delegation tickets some accounts now receive are only accepted with `t=`
+        // (xodus-gaming/xodus#238).
+        Err(e) if e.status() == Some(reqwest::StatusCode::BAD_REQUEST) => {
+            let Some(compact) = crate::licensing::content::delegation_as_compact(&user_token) else {
+                return Err(XboxAuthError::UserAuth(Some(400)));
+            };
+            authenticate_xbox_user(client, compact)
+                .await
+                .map_err(|e| XboxAuthError::UserAuth(e.status().map(|s| s.as_u16())))?
+        }
+        Err(e) => return Err(XboxAuthError::UserAuth(e.status().map(|s| s.as_u16()))),
+    };
 
     request_xsts_token(client, resp.token, relying_party)
         .await

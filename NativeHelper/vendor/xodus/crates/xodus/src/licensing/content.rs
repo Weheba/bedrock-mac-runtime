@@ -20,20 +20,31 @@ pub enum LicenseContentError {
     /// not covered by the account's current subscription tier).
     #[error("not entitled to this content: {description}")]
     NotEntitled { description: String },
+
+    /// The licensing service refused the request without a license decision.
+    #[error("licensing service returned HTTP {0}")]
+    Http(u16),
+
+    #[error("licensing service returned an unreadable response")]
+    Decode,
 }
 
-// we might need a bump in xal-rs concerning reqwest,
-// that might block us from using the correlationvector extension
-pub async fn get_license_content(
+/// Some accounts now receive delegation tickets the licensing service only accepts with
+/// the `t=` prefix (xodus-gaming/xodus#238). Returns None when the ticket has no `d=` prefix.
+pub fn delegation_as_compact(ticket: &str) -> Option<String> {
+    ticket.strip_prefix("d=").map(|rest| format!("t={rest}"))
+}
+
+async fn send_content_request(
     client: &reqwest::Client,
     device_ms_token: String,
     user_ms_token: String,
     ticket_reference: String,
     content_id: String,
     market: String,
-) -> Result<(LicenseContent, License), LicenseContentError> {
+) -> Result<reqwest::Response, reqwest::Error> {
     let cv = CorrelationVector::new();
-    let response = client
+    client
         .post("https://licensing.mp.microsoft.com/v7.0/licenses/content")
         .header("from", "XboxLicenseManager")
         .header("Authorization", device_ms_token)
@@ -58,9 +69,51 @@ pub async fn get_license_content(
             ),
         })
         .send()
-        .await?;
+        .await
+}
 
-    let content_res = response.json::<LicenseContentResponse>().await?;
+// we might need a bump in xal-rs concerning reqwest,
+// that might block us from using the correlationvector extension
+pub async fn get_license_content(
+    client: &reqwest::Client,
+    device_ms_token: String,
+    user_ms_token: String,
+    ticket_reference: String,
+    content_id: String,
+    market: String,
+) -> Result<(LicenseContent, License), LicenseContentError> {
+    let mut response = send_content_request(
+        client,
+        device_ms_token.clone(),
+        user_ms_token.clone(),
+        ticket_reference.clone(),
+        content_id.clone(),
+        market.clone(),
+    )
+    .await?;
+    // The ticket format has to change on both tickets together (xodus-gaming/xodus#238).
+    if response.status() == reqwest::StatusCode::UNAUTHORIZED {
+        let device = delegation_as_compact(&device_ms_token);
+        let user = delegation_as_compact(&user_ms_token);
+        if device.is_some() || user.is_some() {
+            response = send_content_request(
+                client,
+                device.unwrap_or(device_ms_token),
+                user.unwrap_or(user_ms_token),
+                ticket_reference,
+                content_id,
+                market,
+            )
+            .await?;
+        }
+    }
+    let status = response.status();
+    let body = response.bytes().await?;
+    let content_res = match serde_json::from_slice::<LicenseContentResponse>(&body) {
+        Ok(parsed) => parsed,
+        Err(_) if !status.is_success() => return Err(LicenseContentError::Http(status.as_u16())),
+        Err(_) => return Err(LicenseContentError::Decode),
+    };
     let content = match content_res {
         LicenseContentResponse::Success { license } => license,
         LicenseContentResponse::SatisfactionFailure {
@@ -111,4 +164,16 @@ pub async fn get_license_token(
     let token_resp: LicenseTokenResponse = response.json().await?;
 
     Ok(token_resp.license_token)
+}
+
+#[cfg(test)]
+mod ticket_tests {
+    use super::delegation_as_compact;
+
+    #[test]
+    fn only_delegation_tickets_change_prefix() {
+        assert_eq!(delegation_as_compact("d=a.b.c.d.e").as_deref(), Some("t=a.b.c.d.e"));
+        assert_eq!(delegation_as_compact("t=abc"), None);
+        assert_eq!(delegation_as_compact("abc"), None);
+    }
 }
