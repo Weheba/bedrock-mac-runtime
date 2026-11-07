@@ -64,6 +64,7 @@ async fn main() {
                 "PACKAGE_DOWNLOAD_UNAVAILABLE"=>"PACKAGE_DOWNLOAD_UNAVAILABLE",
                 "PACKAGE_AUTHENTICITY_FAILED"=>"PACKAGE_AUTHENTICITY_FAILED",
                 "PACKAGE_FORMAT_UNSUPPORTED"=>"PACKAGE_FORMAT_UNSUPPORTED",
+                license::DEVICE_LIMIT_REACHED=>license::DEVICE_LIMIT_REACHED,
                 "TESTED_PACKAGE_UNAVAILABLE"=>"TESTED_PACKAGE_UNAVAILABLE",
                 _=>"INSTALL_FAILED"
             },_=>"INSTALL_FAILED" };
@@ -122,7 +123,9 @@ async fn run(command: &str, game_id: &str) -> Reply {
     if command == "logout" {
         // Only this helper's private namespace. Never the reference game account.
         // Delete without reading first: reading an item from an older build is what prompts.
-        for key in ["dev_license", "device-tokens", "user-tokens", "user-DA"] {
+        // The device stays: forgetting it registers a new one on the next sign-in, and
+        // Microsoft allows an account only ten.
+        for key in ["user-tokens", "user-DA"] {
             let Ok(entry) = xodus::secrets::get_entry(key) else { return Reply::failure("SIGN_OUT_FAILED"); };
             match entry.delete_credential() {
                 Ok(()) | Err(keyring_core::Error::NoEntry) => {}
@@ -174,6 +177,9 @@ async fn run(command: &str, game_id: &str) -> Reply {
     };
     // Real content license authorization comes BEFORE package lookup. No game/CDN downloads here.
     if let Err(error) = license::get_license(&client, &tokens, content_id.clone(), "neutral".into()).await {
+        if error == license::DEVICE_LIMIT_REACHED {
+            return Reply { schema:1, status:"error", signed_in:true, gamertag, entitlement:"unknown", available_version:None, available_revision:None, error_code:Some(license::DEVICE_LIMIT_REACHED), error_detail:None };
+        }
         return Reply { schema:1, status:"error", signed_in:true, gamertag, entitlement:"unknown", available_version:None, available_revision:None, error_code:Some("ENTITLEMENT_NOT_CONFIRMED"), error_detail:Some(license::failure_code(&error)) };
     }
     let package = match package::get_packages(&client, &tokens, content_id.clone()).await {

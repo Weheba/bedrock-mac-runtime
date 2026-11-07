@@ -4,6 +4,8 @@ use xodus::models::secrets::Token;
 use xodus::models::soap;
 use xodus::tokens::TokenManager;
 
+pub const DEVICE_LIMIT_REACHED: &str = "DEVICE_LIMIT_REACHED";
+
 /// Fixed, non-secret code for a get_license failure. Never echoes the error text.
 pub fn failure_code(error: &str) -> &'static str {
     if error.starts_with("not entitled") { return "LICENSE_NOT_ENTITLED"; }

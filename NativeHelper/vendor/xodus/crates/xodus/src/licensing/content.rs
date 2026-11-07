@@ -22,6 +22,10 @@ pub enum LicenseContentError {
     NotEntitled { description: String },
 
     /// The licensing service refused the request without a license decision.
+    /// The account's Microsoft Store device group is full (satisfaction failure 501).
+    #[error("DEVICE_LIMIT_REACHED")]
+    DeviceLimit,
+
     #[error("licensing service returned HTTP {0}")]
     Http(u16),
 
@@ -119,6 +123,9 @@ pub async fn get_license_content(
         LicenseContentResponse::SatisfactionFailure {
             satisfaction_failure,
         } => {
+            if satisfaction_failure.code == 501 {
+                return Err(LicenseContentError::DeviceLimit);
+            }
             return Err(LicenseContentError::NotEntitled {
                 description: satisfaction_failure.description,
             });
