@@ -123,9 +123,10 @@ async fn run(command: &str, game_id: &str) -> Reply {
     if command == "logout" {
         // Only this helper's private namespace. Never the reference game account.
         // Delete without reading first: reading an item from an older build is what prompts.
-        // The device stays: forgetting it registers a new one on the next sign-in, and
-        // Microsoft allows an account only ten.
-        for key in ["user-tokens", "user-DA"] {
+        // dev_license stays: forgetting it registers a new device on the next sign-in, and
+        // Microsoft allows an account only ten. device-tokens is derived from it and is
+        // re-issued without registering anything.
+        for key in ["device-tokens", "user-tokens", "user-DA"] {
             let Ok(entry) = xodus::secrets::get_entry(key) else { return Reply::failure("SIGN_OUT_FAILED"); };
             match entry.delete_credential() {
                 Ok(()) | Err(keyring_core::Error::NoEntry) => {}
