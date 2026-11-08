@@ -215,7 +215,9 @@ struct GameView: View {
                         Spacer(minLength: 0)
                         VStack(alignment: .trailing, spacing: 5) {
                             Text(model.current(for: game).map { $0.state != .ready ? "Verification needed" : $0.usesUntestedVersion ? "Not tested · may work" : "Ready to play" } ?? "Choose a version").font(.callout.weight(.medium))
-                            Text(model.accounts[game]?.gamertag ?? "Microsoft account").font(.caption).foregroundStyle(.secondary)
+                            if let gamertag = model.accounts[game]?.displayGamertag {
+                                Text(gamertag).font(.caption).foregroundStyle(.secondary)
+                            }
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 5) {
@@ -554,6 +556,19 @@ struct DiagnosticsView: View {
     }
 }
 
+extension AccountStatus {
+    /// The gamertag as the account row shows it: the name alone, or nil while Microsoft has not returned one.
+    var displayGamertag: String? {
+        guard signedIn, let tag = gamertag?.trimmingCharacters(in: .whitespacesAndNewlines), !tag.isEmpty else { return nil }
+        return tag
+    }
+
+    static func accountValue(_ status: AccountStatus?) -> String {
+        guard let status else { return "Not checked" }
+        return status.displayGamertag ?? (status.signedIn ? "Signed in" : "Signed out")
+    }
+}
+
 struct AccountView: View {
     var game: GameDefinition = .dungeons2
     @EnvironmentObject var model: AppModel
@@ -561,7 +576,7 @@ struct AccountView: View {
     var body: some View {
         GroupBox("Microsoft package account") {
             VStack(alignment: .leading, spacing: 12) {
-                LabeledContent("Account", value: model.accounts[game]?.gamertag ?? (model.accounts[game]?.signedIn == true ? "Connected" : "Not checked"))
+                LabeledContent("Account", value: AccountStatus.accountValue(model.accounts[game]))
                 LabeledContent("Content license", value: model.accounts[game]?.entitlement == "verified" ? "Verified by Microsoft" : "Not verified")
                 LabeledContent("Available package", value: model.accounts[game]?.availableVersion ?? "Not checked")
                 HStack {
