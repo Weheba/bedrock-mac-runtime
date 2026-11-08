@@ -65,6 +65,22 @@ final class VersionManagementLayoutTests: XCTestCase {
         XCTAssertNil(model.testedUpdate)
     }
 
+    func testAccountRowShowsOnlyTheGamertag() throws {
+        func status(_ signedIn: Bool, _ gamertag: String?) throws -> AccountStatus {
+            var object: [String: Any] = ["schema": 1, "status": "ok", "signedIn": signedIn, "entitlement": "unknown"]
+            if let gamertag { object["gamertag"] = gamertag }
+            return try AccountStatus.decode(JSONSerialization.data(withJSONObject: object))
+        }
+        XCTAssertEqual(try status(true, "SyntheticTag").displayGamertag, "SyntheticTag")
+        XCTAssertEqual(AccountStatus.accountValue(try status(true, "SyntheticTag")), "SyntheticTag")
+        XCTAssertNil(try status(true, nil).displayGamertag)
+        XCTAssertNil(try status(true, "  ").displayGamertag)
+        XCTAssertEqual(AccountStatus.accountValue(try status(true, nil)), "Signed in")
+        XCTAssertNil(try status(false, nil).displayGamertag)
+        XCTAssertEqual(AccountStatus.accountValue(try status(false, nil)), "Signed out")
+        XCTAssertEqual(AccountStatus.accountValue(nil), "Not checked")
+    }
+
     @MainActor
     private func render(_ name: String, view: some View, size: NSSize, padding: CGFloat = 28) throws {
         let host = NSHostingView(rootView: view.padding(padding).frame(width: size.width, height: size.height, alignment: .topLeading).background(Color(nsColor: .windowBackgroundColor)))
