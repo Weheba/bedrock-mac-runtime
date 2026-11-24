@@ -47,7 +47,6 @@ public enum BedrockSession {
     }
 
     /// Stops the environment's wineserver and every Wine process still inside it.
-    /// Stops early once `mayContinue` reports a game starting or running.
     static func end(_ install: Installation, crossOver: CrossOver, while mayContinue: @Sendable () async -> Bool) async {
         guard await mayContinue(), let bottle = ownedBottle(install, crossOver: crossOver), let processes = try? GameTermination.snapshot() else { return }
         if !servers(for: bottle, snapshot: processes, crossOver: crossOver, workingDirectory: workingDirectory).isEmpty {
