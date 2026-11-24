@@ -84,6 +84,10 @@ starts this same helper as the Xodus-compatible account service in a new private
 Game/Minecraft.Windows.exe and game-specific overrides. The private socket has
 0600 permissions and same-user peer checking. Existing sockets are never unlinked;
 unknown services are never killed. The launcher terminates only its own child.
+Before Play and after the game exits, while no managed game runs, it stops the
+wineserver of each launcher-owned Bedrock environment and any Wine process still
+working inside it. User bottles and Dungeons environments are never touched.
+If the game shows no window within two minutes, the launcher reports it.
 No Xodus run command, RAM volume, hdiutil ram://, WINE_DLL_FILE_MAP, Python bridge,
 per-launch game decryption, allocator patch or Metal HUD is used.
 

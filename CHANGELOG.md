@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- End each Bedrock session cleanly: stop the environment's wineserver and leftover Wine processes before Play and after the game exits.
+- Report when Bedrock is running but shows no window, instead of staying on "running".
+- The Bedrock account service always answers the game within its 5-second limit and no longer drops the connection on a rejected token exchange.
+
 ## 0.4.1 — 2026-11-02
 
 - Fix Microsoft sign-in, ownership checks and Play failing with MICROSOFT_SERVICE_FAILED after Microsoft's late-October change to the Xbox token exchange.

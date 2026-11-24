@@ -103,6 +103,7 @@ final class AppModel: ObservableObject {
         crossOver = CrossOver.detect()
         guard let current, let store, let crossOver, !running, !busy else { return }
         error = nil
+        await BedrockSession.endIdle(database.installations, crossOver: crossOver)
         await perform {
             if current.isOfficialManaged {
                 let status = try await self.nativeAccount.request(.status, game: game)
@@ -133,13 +134,28 @@ final class AppModel: ObservableObject {
         offerTestedUpdate()
             if requestedQuit == game { requestedQuit = nil }
         }
+        let watchdog = current.game == .bedrock ? Task { await self.reportMissingWindow(current, crossOver: crossOver) } : nil
         do {
             try await diagnostics?.record(.launchStarted)
             let exit = try await processes.launch(current, crossOver: crossOver)
+            watchdog?.cancel()
+            await BedrockSession.endIdle(database.installations, crossOver: crossOver)
             try await diagnostics?.record(.launchExited, exitCode: exit)
             message = requestedQuit == game ? "Game stopped." : "CrossOver launch process exited with status \(exit)."
             if exit != 0 && requestedQuit != game { error = LauncherError("GAME_EXITED", "The CrossOver launch process exited with status \(exit).", recovery: "Review Diagnostics and check the game in CrossOver.") }
-        } catch { self.error = error as? LauncherError ?? LauncherError("LAUNCH_FAILED", "The game could not start.") }
+        } catch {
+            watchdog?.cancel()
+            self.error = error as? LauncherError ?? LauncherError("LAUNCH_FAILED", "The game could not start.")
+        }
+    }
+    private func reportMissingWindow(_ install: Installation, crossOver: CrossOver) async {
+        for _ in 0..<24 {
+            try? await Task.sleep(for: .seconds(5))
+            if Task.isCancelled || !running { return }
+            if await Task.detached(operation: { BedrockSession.hasVisibleWindow(install, crossOver: crossOver) }).value { return }
+        }
+        guard !Task.isCancelled, running, error == nil, requestedQuit == nil else { return }
+        error = LauncherError("GAME_NO_WINDOW", "Minecraft did not open a window.", recovery: "Quit the game, then press Play again.")
     }
     func quitGame(_ game: GameDefinition) async {
         guard quittingGame == nil, let crossOver else { return }

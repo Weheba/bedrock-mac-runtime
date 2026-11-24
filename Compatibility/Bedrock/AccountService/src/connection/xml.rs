@@ -8,6 +8,8 @@ use xodus::proto::xodus::XodusMessageType;
 use crate::XML_MAGIC;
 use crate::simple_context::SimpleContext;
 
+const REPLY_DEADLINE: std::time::Duration = std::time::Duration::from_millis(4500);
+
 pub async fn handle(
     socket: &mut tokio::net::UnixStream,
     context: &mut SimpleContext,
@@ -21,12 +23,15 @@ pub async fn handle(
     tracing::debug!("Read buffer");
     let message_type = XodusMessageType::try_from(message_type as i32).unwrap_or_default();
 
-    let out_buf = match parse_message(context, message_type, buffer).await {
-        Ok(buf) => buf,
-        Err(err) => {
+    // The game's IPC layer gives up after IPC_REQUEST_TIMEOUT_MS (5 s) and hands
+    // any later frame to whichever request is waiting next, so always answer first.
+    let out_buf = match tokio::time::timeout(REPLY_DEADLINE, parse_message(context, message_type, buffer)).await {
+        Ok(Ok(buf)) => buf,
+        Ok(Err(err)) => {
             tracing::error!("Failed parsing message: {err}");
             vec![]
         }
+        Err(_) => vec![],
     };
 
     let data = super::encode_message(XML_MAGIC, message_type as u16 + 1, out_buf);
@@ -93,9 +98,9 @@ pub async fn parse_message(
 
             match user_token {
                 ExchangeUserTokenOutcome::Issued(
-                    soap::BodyContent::RequestSecurityTokenResponseCollection(mut collection),
+                    soap::BodyContent::RequestSecurityTokenResponseCollection(collection),
                 ) => {
-                    if let Some(sts) = collection.security_tokens.pop() {
+                    if let Some(sts) = collection.security_tokens.last().cloned() {
                         let address = sts.applies_to.endpoint_reference.address.clone();
                         let sts: Token = sts.into();
                         let address = if let Token::Legacy(legacy) = &sts {
@@ -107,7 +112,9 @@ pub async fn parse_message(
                             tracing::warn!("Failed to persist refreshed STS token: {err}");
                         }
                     }
-                    let token = collection.security_tokens.remove(0);
+                    let Some(token) = collection.security_tokens.into_iter().next() else {
+                        return Ok(vec![]);
+                    };
                     let expiry = chrono::DateTime::parse_from_rfc3339(&token.lifetime.expires)?;
                     let token: Token = token.into();
                     let Token::Compact(user_token) = token else {
@@ -124,7 +131,7 @@ pub async fn parse_message(
                     let payload = quick_xml::se::to_string(&payload)?;
                     Ok(payload.as_bytes().to_vec())
                 }
-                _ => todo!("Error handling sill sucks"),
+                _ => Ok(vec![]),
             }
         }
         _ => Err("Unimplemented".into()),

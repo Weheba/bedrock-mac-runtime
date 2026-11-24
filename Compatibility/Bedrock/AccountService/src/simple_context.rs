@@ -16,6 +16,8 @@ impl SimpleContext {
         let client = reqwest::ClientBuilder::new()
             .user_agent(format!("xodus-service/{}", env!("CARGO_PKG_VERSION")))
             .connection_verbose(true)
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(4))
             .build()
             .unwrap();
 
