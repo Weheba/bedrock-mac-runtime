@@ -58,8 +58,10 @@ public enum BedrockSession {
                 p.standardOutput = FileHandle.nullDevice; p.standardError = FileHandle.nullDevice
                 guard (try? p.run()) != nil else { return }
                 let timer = DispatchWorkItem { if p.isRunning { p.terminate() } }
+                let force = DispatchWorkItem { if p.isRunning { _ = kill(p.processIdentifier, SIGKILL) } }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 20, execute: timer)
-                defer { timer.cancel() }; p.waitUntilExit()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 25, execute: force)
+                defer { timer.cancel(); force.cancel() }; p.waitUntilExit()
             }.value
         }
         for _ in 0..<20 {
@@ -101,7 +103,7 @@ public enum BedrockSession {
     public static func hasGameWindow(_ install: Installation, crossOver: CrossOver) -> Bool {
         guard let processes = try? GameTermination.snapshot() else { return true }
         let pids = Set(processes.filter { GameTermination.matches($0, installation: install, crossOver: crossOver) }.map(\.pid))
-        guard !pids.isEmpty else { return true }
+        guard !pids.isEmpty else { return false }
         guard let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return true }
         return windows.contains { isGameWindow($0, pids: pids) }
     }

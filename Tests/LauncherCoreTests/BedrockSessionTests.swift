@@ -64,6 +64,11 @@ final class BedrockSessionTests: XCTestCase {
         XCTAssertFalse(BedrockSession.isGameWindow(window(layer: -1, width: 854, height: 480, onScreen: true), pids: pids))
         XCTAssertFalse(BedrockSession.isGameWindow(window(pid: 8, width: 854, height: 480, onScreen: true), pids: pids))
     }
+
+    func testNoWindowWhileTheGameHasNotStarted() {
+        let install = Installation(game: .bedrock, version: "1.26.5203.0", path: URL(fileURLWithPath: "/fixture/NotStarted"), bottle: "MinecraftMac-bedrock-fixture", managed: true)
+        XCTAssertFalse(BedrockSession.hasGameWindow(install, crossOver: cx))
+    }
 }
 
 final class SessionFlag: @unchecked Sendable {

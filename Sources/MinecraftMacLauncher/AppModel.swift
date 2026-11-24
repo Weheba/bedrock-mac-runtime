@@ -106,7 +106,13 @@ final class AppModel: ObservableObject {
         crossOver = CrossOver.detect()
         guard let current, let store, let crossOver, !running, !busy, !launching else { return }
         launching = true
-        defer { launching = false }
+        defer {
+            launching = false
+            running = CrossOver.gameRunning()
+            runningGames = GameTermination.runningGames(installations: database.installations, crossOver: crossOver)
+            if requestedQuit == game { requestedQuit = nil }
+            offerTestedUpdate()
+        }
         error = nil
         let prepared = await perform {
             await self.processes.endIdleSessions(self.database.installations, crossOver: crossOver)
@@ -133,12 +139,6 @@ final class AppModel: ObservableObject {
         guard prepared, error == nil, database.installations.first(where: { $0.id == current.id })?.state == .ready else { return }
         requestedQuit = nil
         running = true; runningGames.insert(game)
-        defer {
-            running = CrossOver.gameRunning()
-            runningGames = GameTermination.runningGames(installations: database.installations, crossOver: crossOver)
-            offerTestedUpdate()
-            if requestedQuit == game { requestedQuit = nil }
-        }
         let watchdog = current.game == .bedrock ? Task { await self.reportMissingWindow(current, crossOver: crossOver) } : nil
         do {
             try await diagnostics?.record(.launchStarted)
