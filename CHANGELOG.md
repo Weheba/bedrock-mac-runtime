@@ -1,10 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 — 2026-11-24
 
 - End each Bedrock session cleanly: stop the environment's wineserver and leftover Wine processes before Play and after the game exits.
 - Report when Bedrock is running but shows no window, instead of staying on "running".
 - The Bedrock account service always answers the game within its 5-second limit and no longer drops the connection on a rejected token exchange.
+- Updating from 0.4.1 asks for one Microsoft sign-in.
 
 ## 0.4.1 — 2026-11-02
 
