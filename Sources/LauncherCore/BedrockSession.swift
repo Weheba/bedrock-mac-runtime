@@ -13,7 +13,6 @@ public enum BedrockSession {
         }
     }
 
-    /// Wine processes that keep running inside the environment after its wineserver is gone.
     static func leftovers(in bottle: URL, snapshot: [GameProcessIdentity], crossOver: CrossOver, workingDirectory: (Int32) -> String?) -> [GameProcessIdentity] {
         let root = bottle.resolvingSymlinksInPath().path + "/"
         return snapshot.filter { process in
