@@ -47,9 +47,9 @@ public enum BedrockSession {
     }
 
     /// Stops the environment's wineserver and every Wine process still inside it.
-    /// Callers must ensure no managed game is running.
-    public static func end(_ install: Installation, crossOver: CrossOver) async {
-        guard let bottle = ownedBottle(install, crossOver: crossOver), let processes = try? GameTermination.snapshot() else { return }
+    /// Stops early once `mayContinue` reports a game starting or running.
+    static func end(_ install: Installation, crossOver: CrossOver, while mayContinue: @Sendable () async -> Bool) async {
+        guard await mayContinue(), let bottle = ownedBottle(install, crossOver: crossOver), let processes = try? GameTermination.snapshot() else { return }
         if !servers(for: bottle, snapshot: processes, crossOver: crossOver, workingDirectory: workingDirectory).isEmpty {
             let wineserver = crossOver.wine.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("bin/wineserver")
             await Task.detached {
@@ -64,7 +64,7 @@ public enum BedrockSession {
             }.value
         }
         for _ in 0..<20 {
-            guard let processes = try? GameTermination.snapshot() else { return }
+            guard await mayContinue(), let processes = try? GameTermination.snapshot() else { return }
             let remaining = leftovers(in: bottle, snapshot: processes, crossOver: crossOver, workingDirectory: workingDirectory) +
                 servers(for: bottle, snapshot: processes, crossOver: crossOver, workingDirectory: workingDirectory)
             if remaining.isEmpty { return }
@@ -76,23 +76,34 @@ public enum BedrockSession {
         }
     }
 
-    public static func endIdle(_ installations: [Installation], crossOver: CrossOver) async {
-        guard !CrossOver.gameRunning() else { return }
+    static func endIdle(_ installations: [Installation], crossOver: CrossOver, while mayContinue: @Sendable () async -> Bool) async {
         var seen = Set<String>()
         for install in installations where install.game == .bedrock && seen.insert(install.bottle).inserted {
-            await end(install, crossOver: crossOver)
+            await end(install, crossOver: crossOver, while: mayContinue)
         }
     }
 
-    /// True when a process of this installation shows a normal window on screen.
-    public static func hasVisibleWindow(_ install: Installation, crossOver: CrossOver) -> Bool {
+    /// While the game has no window, Wine keeps only a hidden placeholder of about 500x500.
+    /// Fullscreen, minimized and other-Space windows are off screen or above layer 0 but keep the game's size.
+    static let minimumHiddenWindowArea: CGFloat = 640 * 480
+
+    static func isGameWindow(_ window: [String: Any], pids: Set<Int32>) -> Bool {
+        guard let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, pids.contains(pid),
+              let layer = (window[kCGWindowLayer as String] as? NSNumber)?.intValue, layer >= 0,
+              let bounds = window[kCGWindowBounds as String] as? NSDictionary,
+              let rect = CGRect(dictionaryRepresentation: bounds), rect.width >= 64, rect.height >= 64 else { return false }
+        let onScreen = (window[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue == true
+        let alpha = (window[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1
+        if onScreen && alpha > 0 { return true }
+        return rect.width * rect.height >= minimumHiddenWindowArea
+    }
+
+    /// True when a process of this installation owns a game window, shown or not.
+    public static func hasGameWindow(_ install: Installation, crossOver: CrossOver) -> Bool {
         guard let processes = try? GameTermination.snapshot() else { return true }
         let pids = Set(processes.filter { GameTermination.matches($0, installation: install, crossOver: crossOver) }.map(\.pid))
         guard !pids.isEmpty else { return true }
-        guard let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return true }
-        return windows.contains { window in
-            guard let pid = (window[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value, pids.contains(pid) else { return false }
-            return (window[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
-        }
+        guard let windows = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] else { return true }
+        return windows.contains { isGameWindow($0, pids: pids) }
     }
 }

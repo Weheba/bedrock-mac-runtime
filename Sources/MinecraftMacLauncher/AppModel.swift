@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
     @Published var quittingGame: GameDefinition?
     private var requestedQuit: GameDefinition?
     @Published var running = false
+    private var launching = false
     @Published var busy = false
     @Published var message = ""
     @Published var staging: [String] = []
@@ -60,7 +61,7 @@ final class AppModel: ObservableObject {
     }
     func refresh() async {
         if let store { database = await store.snapshot(); staging = await store.staleStaging() }
-        crossOver = CrossOver.detect(); running = CrossOver.gameRunning()
+        crossOver = CrossOver.detect(); running = launching || CrossOver.gameRunning()
         runningGames = GameTermination.runningGames(installations: database.installations, crossOver: crossOver)
         offerTestedUpdate()
     }
@@ -82,14 +83,16 @@ final class AppModel: ObservableObject {
     func progressHandler() -> @Sendable (OperationProgress) -> Void {
         { [weak self] update in Task { @MainActor in if let self, self.busy { self.progress = update } } }
     }
-    func perform(_ operation: @MainActor () async throws -> Void) async {
-        guard !busy, !running else { return }
+    @discardableResult
+    func perform(_ operation: @MainActor () async throws -> Void) async -> Bool {
+        guard !busy, !running else { return false }
         busy = true; error = nil; message = ""; defer { busy = false; progress = nil }
         do { try await operation() } catch {
             self.error = error as? LauncherError ?? LauncherError("OPERATION_FAILED", "The operation could not finish safely.", recovery: "Your original installation is preserved. Review Diagnostics and retry.")
             try? await diagnostics?.record(.operationFailed)
         }
         await refresh()
+        return true
     }
     func chooseInstallation() {
         let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true
@@ -101,10 +104,12 @@ final class AppModel: ObservableObject {
         let game = game ?? selectedGame
         let current = database.current(for: game)
         crossOver = CrossOver.detect()
-        guard let current, let store, let crossOver, !running, !busy else { return }
+        guard let current, let store, let crossOver, !running, !busy, !launching else { return }
+        launching = true
+        defer { launching = false }
         error = nil
-        await BedrockSession.endIdle(database.installations, crossOver: crossOver)
-        await perform {
+        let prepared = await perform {
+            await self.processes.endIdleSessions(self.database.installations, crossOver: crossOver)
             if current.isOfficialManaged {
                 let status = try await self.nativeAccount.request(.status, game: game)
                 if !status.signedIn { self.accounts[game] = try await self.nativeAccount.request(.login, game: game) }
@@ -125,13 +130,13 @@ final class AppModel: ObservableObject {
             } else { _ = try await store.reverify(current.id, progress: self.progressHandler()) }
             try await self.diagnostics?.record(.installationVerified)
         }
-        guard error == nil, database.installations.first(where: { $0.id == current.id })?.state == .ready else { return }
+        guard prepared, error == nil, database.installations.first(where: { $0.id == current.id })?.state == .ready else { return }
         requestedQuit = nil
         running = true; runningGames.insert(game)
         defer {
             running = CrossOver.gameRunning()
             runningGames = GameTermination.runningGames(installations: database.installations, crossOver: crossOver)
-        offerTestedUpdate()
+            offerTestedUpdate()
             if requestedQuit == game { requestedQuit = nil }
         }
         let watchdog = current.game == .bedrock ? Task { await self.reportMissingWindow(current, crossOver: crossOver) } : nil
@@ -139,7 +144,8 @@ final class AppModel: ObservableObject {
             try await diagnostics?.record(.launchStarted)
             let exit = try await processes.launch(current, crossOver: crossOver)
             watchdog?.cancel()
-            await BedrockSession.endIdle(database.installations, crossOver: crossOver)
+            if error?.code == "GAME_NO_WINDOW" { error = nil }
+            await processes.endIdleSessions(database.installations, crossOver: crossOver)
             try await diagnostics?.record(.launchExited, exitCode: exit)
             message = requestedQuit == game ? "Game stopped." : "CrossOver launch process exited with status \(exit)."
             if exit != 0 && requestedQuit != game { error = LauncherError("GAME_EXITED", "The CrossOver launch process exited with status \(exit).", recovery: "Review Diagnostics and check the game in CrossOver.") }
@@ -149,13 +155,17 @@ final class AppModel: ObservableObject {
         }
     }
     private func reportMissingWindow(_ install: Installation, crossOver: CrossOver) async {
-        for _ in 0..<24 {
+        for pass in 1... {
             try? await Task.sleep(for: .seconds(5))
             if Task.isCancelled || !running { return }
-            if await Task.detached(operation: { BedrockSession.hasVisibleWindow(install, crossOver: crossOver) }).value { return }
+            if await Task.detached(operation: { BedrockSession.hasGameWindow(install, crossOver: crossOver) }).value {
+                if error?.code == "GAME_NO_WINDOW" { error = nil }
+                return
+            }
+            if pass == 24, error == nil, requestedQuit == nil {
+                error = LauncherError("GAME_NO_WINDOW", "Minecraft did not open a window.", recovery: "Quit the game, then press Play again.")
+            }
         }
-        guard !Task.isCancelled, running, error == nil, requestedQuit == nil else { return }
-        error = LauncherError("GAME_NO_WINDOW", "Minecraft did not open a window.", recovery: "Quit the game, then press Play again.")
     }
     func quitGame(_ game: GameDefinition) async {
         guard quittingGame == nil, let crossOver else { return }

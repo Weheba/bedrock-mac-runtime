@@ -69,13 +69,43 @@ public struct CrossOver: Sendable {
         }
     }
 }
+/// Launches and Bedrock session cleanup are mutually exclusive: a launch waits for cleanup,
+/// and cleanup never starts or continues while a launch is in flight or a game runs.
 public actor GameProcess {
     private var process: Process?
-    public init() {}
-    public func launch(_ install: Installation, crossOver: CrossOver) async throws -> Int32 {
-        guard process == nil, !CrossOver.gameRunning() else {
+    private var reserved = false
+    private var cleanup: Task<Void, Never>?
+    private let gameRunning: @Sendable () -> Bool
+    public init() { gameRunning = CrossOver.gameRunning }
+    init(gameRunning: @escaping @Sendable () -> Bool) { self.gameRunning = gameRunning }
+
+    var idle: Bool { !reserved && process == nil && !gameRunning() }
+
+    func reserve() async throws {
+        while let cleanup { await cleanup.value }
+        guard !reserved, process == nil, !gameRunning() else {
             throw LauncherError("GAME_ALREADY_RUNNING", "A managed game is already running.", recovery: "Quit the game before starting another instance.")
         }
+        reserved = true
+    }
+    func release() { reserved = false }
+
+    public func endIdleSessions(_ installations: [Installation], crossOver: CrossOver) async {
+        await endIdle { mayContinue in await BedrockSession.endIdle(installations, crossOver: crossOver, while: mayContinue) }
+    }
+
+    func endIdle(_ work: @escaping @Sendable (_ mayContinue: @escaping @Sendable () async -> Bool) async -> Void) async {
+        if let cleanup { return await cleanup.value }
+        guard idle else { return }
+        let task = Task { await work { await self.idle }; self.finishCleanup() }
+        cleanup = task
+        await task.value
+    }
+    private func finishCleanup() { cleanup = nil }
+
+    public func launch(_ install: Installation, crossOver: CrossOver) async throws -> Int32 {
+        try await reserve()
+        defer { reserved = false }
         _ = try crossOver.bottleURL(install.bottle)
         let p = Process(); p.executableURL = crossOver.wine; p.arguments = crossOver.launchArguments(install)
         var broker: CredentialBroker?

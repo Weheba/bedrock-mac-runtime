@@ -31,7 +31,10 @@ pub async fn handle(
             tracing::error!("Failed parsing message: {err}");
             vec![]
         }
-        Err(_) => vec![],
+        Err(_) => {
+            tracing::warn!("No reply to {message_type:?} within {REPLY_DEADLINE:?}; answering empty");
+            vec![]
+        }
     };
 
     let data = super::encode_message(XML_MAGIC, message_type as u16 + 1, out_buf);
@@ -59,14 +62,33 @@ pub async fn parse_message(
                 "xboxlive.signin"
             };
             let device_token = context.device_token.as_ref().unwrap();
-            let device_token_resp = xodus::api::live::exchange_device_token(
-                &context.client,
-                device_token.clone(),
-                "{28C08266-F973-4AE6-FFE4-409B249F138F}".to_string(),
-                "scope=service::user.auth.xboxlive.com::MBI_SSL".to_owned(),
-                Some(soap::PolicyReference::token_broker()),
-            )
-            .await;
+            let user_scopes = [
+                (
+                    format!("scope={scope}&api-version=2.0&clientid={}", req.client_id),
+                    Some(soap::PolicyReference::token_broker()),
+                ),
+                ("http://Passport.NET/tb".to_string(), None),
+            ];
+            let (device_token_resp, user_token) = tokio::join!(
+                xodus::api::live::exchange_device_token(
+                    &context.client,
+                    device_token.clone(),
+                    "{28C08266-F973-4AE6-FFE4-409B249F138F}".to_string(),
+                    "scope=service::user.auth.xboxlive.com::MBI_SSL".to_owned(),
+                    Some(soap::PolicyReference::token_broker()),
+                ),
+                xodus::api::live::exchange_user_token(
+                    &context.client,
+                    token,
+                    "USERNAME".to_string(),
+                    device_token.clone(),
+                    None,
+                    Some("Silent".to_string()),
+                    req.client_id.clone(),
+                    &user_scopes,
+                ),
+            );
+            let user_token = user_token?;
 
             let ms_device_rps_token = if let Some((Token::Compact(ms_device_token), Ok(lifetime))) =
                 device_token_resp.ok().map(|t| {
@@ -77,24 +99,6 @@ pub async fn parse_message(
             } else {
                 None
             };
-
-            let user_token = xodus::api::live::exchange_user_token(
-                &context.client,
-                token,
-                "USERNAME".to_string(),
-                device_token.clone(),
-                None,
-                Some("Silent".to_string()),
-                req.client_id.clone(),
-                &[
-                    (
-                        format!("scope={scope}&api-version=2.0&clientid={}", req.client_id),
-                        Some(soap::PolicyReference::token_broker()),
-                    ),
-                    ("http://Passport.NET/tb".to_string(), None),
-                ],
-            )
-            .await?;
 
             match user_token {
                 ExchangeUserTokenOutcome::Issued(
